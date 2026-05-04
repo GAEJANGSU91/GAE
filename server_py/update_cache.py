@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 
-from main import get_daily, get_investor, get_theme
+from main import get_daily, get_investor, get_theme, get_program
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -31,19 +31,24 @@ def save_json(path, data):
 
 
 def update_one(code):
-    daily = get_daily(code)
-    investor = get_investor(code)
-    theme = get_theme(code)
+    code = str(code).zfill(6)
+
+    daily = get_daily(code, refresh=1)
+    investor = get_investor(code, refresh=1)
+    theme = get_theme(code, refresh=1)
+    program = get_program(code, refresh=1)
 
     save_json(os.path.join(CACHE_DIR, f"daily_{code}.json"), daily)
     save_json(os.path.join(CACHE_DIR, f"investor_{code}.json"), investor)
     save_json(os.path.join(CACHE_DIR, f"theme_{code}.json"), theme)
+    save_json(os.path.join(CACHE_DIR, f"program_{code}.json"), program)
 
     return {
         "code": code,
         "dailyCount": daily.get("count", 0) if isinstance(daily, dict) else 0,
         "investorOk": bool(isinstance(investor, dict) and investor.get("summary")),
         "themeOk": bool(isinstance(theme, dict) and theme.get("themeGroups")),
+        "programOk": bool(isinstance(program, dict) and program.get("summary")),
     }
 
 
