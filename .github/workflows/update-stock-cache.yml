@@ -1,0 +1,19 @@
+name: Update stock cache
+
+on:
+  schedule:
+    - cron: "0 7 * * 1-5"      # 16:00 KST, 정규장 이후 1차 업데이트
+    - cron: "10 11 * * 1-5"    # 20:10 KST, NXT 이후 2차 업데이트
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Call stock cache update API
+        run: |
+          curl -X POST "${{ secrets.STOCK_API_BASE_URL }}/api/update-all" \
+            -H "X-UPDATE-TOKEN: ${{ secrets.UPDATE_TOKEN }}" \
+            --fail \
+            --show-error
