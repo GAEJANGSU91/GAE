@@ -1566,7 +1566,7 @@ export default function App() {
       setDataLoading(true);
       setDataError("");
       try {
-        const response = await fetch(`http://127.0.0.1:4000/api/daily/${stock.code}`);
+        const response = await fetch(`https://gae-stock-api.onrender.com/api/daily/${stock.code}`);
         if (!response.ok) throw new Error("일봉 데이터를 불러오지 못했습니다.");
         const json = await response.json();
         if (!cancelled) setDailyData(json.data || []);
@@ -1590,7 +1590,7 @@ export default function App() {
       setInvestorLoading(true);
       setInvestorError("");
       try {
-        const response = await fetch(`http://127.0.0.1:4000/api/investor/${stock.code}`);
+        const response = await fetch(`https://gae-stock-api.onrender.com/api/investor/${stock.code}`);
         if (!response.ok) throw new Error("수급 데이터를 불러오지 못했습니다.");
         const json = await response.json();
         if (!cancelled) setInvestorData(json);
@@ -1733,7 +1733,7 @@ export default function App() {
 
       try {
         setPeerLoading(true);
-        const themeResponse = await fetch(`http://127.0.0.1:4000/api/theme/${stock.code}`);
+        const themeResponse = await fetch(`https://gae-stock-api.onrender.com/api/theme/${stock.code}`);
         const themeJson = await themeResponse.json();
         const groups = Array.isArray(themeJson.themeGroups) ? themeJson.themeGroups : [];
         const safeIndex = Math.min(activeThemeIndex, Math.max(0, groups.length - 1));
@@ -1748,7 +1748,7 @@ export default function App() {
         const rows = await Promise.all(
           peers.map(async (peer) => {
             try {
-              const dailyResponse = await fetch(`http://127.0.0.1:4000/api/daily/${peer.code}`);
+              const dailyResponse = await fetch(`https://gae-stock-api.onrender.com/api/daily/${peer.code}`);
               const dailyJson = await dailyResponse.json();
               const peerDaily = Array.isArray(dailyJson.data) ? dailyJson.data : [];
               if (peerDaily.length < 30) return null;
@@ -1822,7 +1822,7 @@ export default function App() {
     }
 
     try {
-      const response = await fetch(`http://127.0.0.1:4000/api/search?q=${encodeURIComponent(key)}`);
+      const response = await fetch(`https://gae-stock-api.onrender.com/api/search?q=${encodeURIComponent(key)}`);
       const json = await response.json();
       const found = json.data?.[0];
 
