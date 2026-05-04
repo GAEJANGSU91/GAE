@@ -40,6 +40,7 @@ THEME_CACHE = {
     "rules": None,
 }
 
+FORCE_LIVE_UPDATE = {"enabled": False}
 
 PERIOD_DAYS = {
     "1주": 5,
@@ -56,6 +57,40 @@ NAVER_LONG_TERM_PAGES = 55
 # =========================
 # 공통 유틸
 # =========================
+
+def ensure_cache_dir():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def cache_path(filename):
+    ensure_cache_dir()
+    return os.path.join(CACHE_DIR, filename)
+
+
+def read_cache_json(filename):
+    path = cache_path(filename)
+
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[cache read error] {filename}: {e}")
+        return None
+
+
+def write_cache_json(filename, data):
+    try:
+        path = cache_path(filename)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[cache write error] {filename}: {e}")
+        return False
+
 
 def to_yyyymmdd(dt):
     return dt.strftime("%Y%m%d")
@@ -600,6 +635,88 @@ def get_stock_market_cap(code: str):
 
 
 # =========================
+# Daily Live
+# =========================
+
+def get_daily_live(code: str):
+    code = str(code).zfill(6)
+
+    end = datetime.today()
+    start = end - timedelta(days=900)
+
+    df = stock.get_market_ohlcv_by_date(
+        to_yyyymmdd(start),
+        to_yyyymmdd(end),
+        code
+    )
+
+    if df is None or df.empty:
+        return {"code": code, "count": 0, "data": [], "source": "pykrx_live"}
+
+    df = df.reset_index()
+
+    if "날짜" in df.columns:
+        df = df.sort_values("날짜").reset_index(drop=True)
+
+    if "거래대금" not in df.columns:
+        df["거래대금"] = df["종가"] * df["거래량"]
+
+    for col in ["시가", "고가", "저가", "종가", "거래량", "거래대금"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    if len(df) >= 30:
+        last = df.iloc[-1]
+        prev_window = df.iloc[-21:-1]
+
+        last_volume = safe_int(last.get("거래량", 0))
+        last_value = safe_int(last.get("거래대금", 0))
+
+        median_volume = safe_float(prev_window["거래량"].median())
+        median_value = safe_float(prev_window["거래대금"].median())
+
+        is_abnormally_low_volume = (
+            median_volume >= 10000
+            and last_volume <= max(1000, median_volume * 0.01)
+        )
+
+        is_abnormally_low_value = (
+            median_value >= 100000000
+            and last_value <= max(50000000, median_value * 0.01)
+        )
+
+        if is_abnormally_low_volume and is_abnormally_low_value:
+            print(
+                f"[drop abnormal latest daily] code={code}, "
+                f"date={last.get('날짜')}, "
+                f"volume={last_volume}, median_volume={median_volume}, "
+                f"value={last_value}, median_value={median_value}"
+            )
+            df = df.iloc[:-1].reset_index(drop=True)
+
+    data = []
+
+    for _, row in df.iterrows():
+        data.append({
+            "date": row["날짜"].strftime("%Y%m%d") if hasattr(row["날짜"], "strftime") else str(row["날짜"]),
+            "open": safe_int(row["시가"]),
+            "high": safe_int(row["고가"]),
+            "low": safe_int(row["저가"]),
+            "close": safe_int(row["종가"]),
+            "volume": safe_int(row["거래량"]),
+            "value": safe_int(row["거래대금"]),
+        })
+
+    return {
+        "code": code,
+        "count": len(data),
+        "data": data,
+        "source": "pykrx_live",
+        "cachedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+
+# =========================
 # 네이버 수급 데이터
 # =========================
 
@@ -896,6 +1013,107 @@ def calculate_supply_score(sum1, sum5, sum20, strength20=None, foreign_hold_chan
     return score, signal
 
 
+def get_investor_live(code: str):
+    try:
+        code = str(code).zfill(6)
+        df = fetch_naver_investor_data(code, pages=NAVER_LONG_TERM_PAGES)
+        market_cap = get_stock_market_cap(code)
+
+        if df.empty:
+            return {
+                "code": code,
+                "summary": None,
+                "error": "네이버 수급 데이터를 찾지 못했습니다.",
+                "debug": {
+                    "source": "naver_frgn",
+                    "url": f"https://finance.naver.com/item/frgn.naver?code={code}",
+                    "message": "네이버 외국인·기관 매매동향 표를 읽지 못했습니다."
+                }
+            }
+
+        sum1 = sum_naver_investor_period(df, 1)
+        sum5 = sum_naver_investor_period(df, 5)
+        sum20 = sum_naver_investor_period(df, 20)
+
+        period_summary = {
+            label: sum_naver_investor_period(df, days)
+            for label, days in PERIOD_DAYS.items()
+        }
+
+        supply_strength = build_supply_strength_summary(period_summary, market_cap)
+        strength20 = supply_strength.get("1개월", {})
+
+        foreign_hold_change5 = calculate_foreign_hold_change(df, 5)
+        foreign_hold_change20 = calculate_foreign_hold_change(df, 20)
+
+        supply_score, signal = calculate_supply_score(
+            sum1,
+            sum5,
+            sum20,
+            strength20=strength20,
+            foreign_hold_change20=foreign_hold_change20
+        )
+
+        avg_cost = {
+            label: avg_cost_from_naver_period(df, days)
+            for label, days in PERIOD_DAYS.items()
+        }
+
+        last_row = df.iloc[-1]
+        last_date = str(last_row.get("dateText", ""))
+        foreign_hold_rate = safe_float(last_row.get("foreignHoldRate", 0))
+
+        recent_rows = []
+
+        for _, row in df.tail(20).iterrows():
+            recent_rows.append({
+                "date": str(row.get("dateText", "")),
+                "retail": int(row.get("retail", 0)),
+                "foreign": int(row.get("foreign", 0)),
+                "institution": int(row.get("institution", 0)),
+                "retailQty": int(row.get("retailQty", 0)),
+                "foreignQty": int(row.get("foreignQty", 0)),
+                "institutionQty": int(row.get("institutionQty", 0)),
+                "foreignHoldRate": safe_float(row.get("foreignHoldRate", 0)),
+                "close": int(row.get("close", 0)),
+            })
+
+        return {
+            "code": code,
+            "summary": {
+                "date": last_date,
+                "marketCap": market_cap,
+                "sum1": sum1,
+                "sum5": sum5,
+                "sum20": sum20,
+                "periodSummary": period_summary,
+                "supplyStrength": supply_strength,
+                "foreignHoldRate": foreign_hold_rate,
+                "foreignHoldRateChange5": foreign_hold_change5,
+                "foreignHoldRateChange20": foreign_hold_change20,
+                "supplyScore": supply_score,
+                "signal": signal,
+                "avgCost": avg_cost,
+            },
+            "recent": recent_rows,
+            "source": "naver_frgn_estimated_live",
+            "cachedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "debug": {
+                "rows": len(df),
+                "firstDate": str(df.iloc[0].get("dateText", "")),
+                "lastDate": last_date,
+                "marketCap": market_cap,
+                "foreignHoldRate": foreign_hold_rate,
+                "foreignHoldRateChange5": foreign_hold_change5,
+                "foreignHoldRateChange20": foreign_hold_change20,
+                "note": "외국인·기관 순매수 금액은 네이버 순매매량 × 종가로 추정. 수급강도는 순매수 추정금액 / 시가총액 × 100. 외국인 보유율 변화는 %p 기준."
+            }
+        }
+
+    except Exception as e:
+        return {"code": code, "summary": None, "error": str(e)}
+
+
 # =========================
 # 네이버 프로그램 매매
 # =========================
@@ -1050,148 +1268,78 @@ def calculate_program_score(sum1, sum5, sum20):
     return score, signal
 
 
-# =========================
-# API
-# =========================
-
-@app.get("/")
-def root():
-    return {"message": "stock api server is running"}
-
-
-@app.get("/api/daily/{code}")
-def get_daily(code: str):
-    code = str(code).zfill(6)
-
-    end = datetime.today()
-    start = end - timedelta(days=900)
-
-    df = stock.get_market_ohlcv_by_date(
-        to_yyyymmdd(start),
-        to_yyyymmdd(end),
-        code
-    )
-
-    if df is None or df.empty:
-        return {"code": code, "count": 0, "data": []}
-
-    df = df.reset_index()
-
-    if "날짜" in df.columns:
-        df = df.sort_values("날짜").reset_index(drop=True)
-
-    if "거래대금" not in df.columns:
-        df["거래대금"] = df["종가"] * df["거래량"]
-
-    for col in ["시가", "고가", "저가", "종가", "거래량", "거래대금"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    if len(df) >= 30:
-        last = df.iloc[-1]
-        prev_window = df.iloc[-21:-1]
-
-        last_volume = safe_int(last.get("거래량", 0))
-        last_value = safe_int(last.get("거래대금", 0))
-
-        median_volume = safe_float(prev_window["거래량"].median())
-        median_value = safe_float(prev_window["거래대금"].median())
-
-        is_abnormally_low_volume = (
-            median_volume >= 10000
-            and last_volume <= max(1000, median_volume * 0.01)
-        )
-
-        is_abnormally_low_value = (
-            median_value >= 100000000
-            and last_value <= max(50000000, median_value * 0.01)
-        )
-
-        if is_abnormally_low_volume and is_abnormally_low_value:
-            print(
-                f"[drop abnormal latest daily] code={code}, "
-                f"date={last.get('날짜')}, "
-                f"volume={last_volume}, median_volume={median_volume}, "
-                f"value={last_value}, median_value={median_value}"
-            )
-            df = df.iloc[:-1].reset_index(drop=True)
-
-    data = []
-
-    for _, row in df.iterrows():
-        data.append({
-            "date": row["날짜"].strftime("%Y%m%d") if hasattr(row["날짜"], "strftime") else str(row["날짜"]),
-            "open": safe_int(row["시가"]),
-            "high": safe_int(row["고가"]),
-            "low": safe_int(row["저가"]),
-            "close": safe_int(row["종가"]),
-            "volume": safe_int(row["거래량"]),
-            "value": safe_int(row["거래대금"]),
-        })
-
-    return {"code": code, "count": len(data), "data": data}
-
-
-@app.get("/api/search")
-def search_stock(q: str):
+def get_program_live(code: str):
     try:
-        q = str(q or "").strip()
-        q_lower = q.lower()
-        stock_list = get_stock_list()
+        code = str(code).zfill(6)
+        df = fetch_naver_program_data(code, pages=NAVER_LONG_TERM_PAGES)
 
-        result = []
+        if df.empty:
+            return {
+                "code": code,
+                "summary": None,
+                "error": "네이버 프로그램 매매 데이터를 찾지 못했습니다.",
+                "debug": {
+                    "source": "naver_program",
+                    "url": f"https://finance.naver.com/item/program.naver?code={code}",
+                    "message": "네이버 프로그램 매매동향 표를 읽지 못했습니다."
+                }
+            }
 
-        for item in stock_list:
-            name = str(item.get("name", "")).strip()
-            code = str(item.get("code", "")).strip()
+        sum1 = sum_program_period(df, 1)
+        sum5 = sum_program_period(df, 5)
+        sum20 = sum_program_period(df, 20)
 
-            name_lower = name.lower()
-            code_lower = code.lower()
+        period_summary = {
+            label: sum_program_period(df, days)
+            for label, days in PERIOD_DAYS.items()
+        }
 
-            matched = False
-            rank = 999
+        program_score, signal = calculate_program_score(sum1, sum5, sum20)
 
-            if q_lower and q_lower == code_lower:
-                matched = True
-                rank = 0
-            elif q_lower and q_lower == name_lower:
-                matched = True
-                rank = 1
-            elif q_lower and name_lower.startswith(q_lower):
-                matched = True
-                rank = 2
-            elif q_lower and q_lower in name_lower:
-                matched = True
-                rank = 3
-            elif q_lower and q_lower in code_lower:
-                matched = True
-                rank = 4
+        last_row = df.iloc[-1]
+        last_date = str(last_row.get("dateText", ""))
 
-            if matched:
-                result.append({**item, "searchRank": rank})
+        recent_rows = []
 
-        result = sorted(
-            result,
-            key=lambda item: (
-                item.get("searchRank", 999),
-                len(str(item.get("name", ""))),
-                item.get("name", "")
-            )
-        )
+        for _, row in df.tail(20).iterrows():
+            recent_rows.append({
+                "date": str(row.get("dateText", "")),
+                "close": int(row.get("close", 0)),
+                "quantity": int(row.get("quantity", 0)),
+                "amount": int(row.get("amount", 0)),
+            })
 
         return {
-            "query": q,
-            "total_count": len(stock_list),
-            "count": len(result),
-            "data": result[:30]
+            "code": code,
+            "summary": {
+                "date": last_date,
+                "sum1": sum1,
+                "sum5": sum5,
+                "sum20": sum20,
+                "periodSummary": period_summary,
+                "programScore": program_score,
+                "signal": signal,
+            },
+            "recent": recent_rows,
+            "source": "naver_program_estimated_live",
+            "cachedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "debug": {
+                "rows": len(df),
+                "firstDate": str(df.iloc[0].get("dateText", "")),
+                "lastDate": last_date,
+                "note": "프로그램 금액은 네이버 프로그램 순매매량 × 종가 기준 추정."
+            }
         }
 
     except Exception as e:
-        return {"query": q, "count": 0, "data": [], "error": str(e)}
+        return {"code": code, "summary": None, "error": str(e)}
 
 
-@app.get("/api/theme/{code}")
-def get_theme(code: str):
+# =========================
+# Theme Live
+# =========================
+
+def get_theme_live(code: str):
     try:
         stock_list = get_stock_list()
         momentum = load_theme_momentum()
@@ -1214,7 +1362,8 @@ def get_theme(code: str):
                 "allThemesCount": 0,
                 "selectedThemes": ["미분류"],
                 "themeGroups": [],
-                "peers": []
+                "peers": [],
+                "source": "theme_live"
             }
 
         all_themes = found.get("themes", [])
@@ -1277,7 +1426,9 @@ def get_theme(code: str):
             "marketCap": found.get("marketCap", 0),
             "themeGroups": theme_groups,
             "peers": first_group.get("peers", []),
-            "coreMarketCapTop": first_group.get("coreMarketCapTop", [])
+            "coreMarketCapTop": first_group.get("coreMarketCapTop", []),
+            "source": "theme_live",
+            "cachedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
     except Exception as e:
@@ -1289,176 +1440,144 @@ def get_theme(code: str):
             "selectedThemes": ["미분류"],
             "themeGroups": [],
             "peers": [],
-            "error": str(e)
+            "error": str(e),
+            "source": "theme_live_error"
         }
+
+
+# =========================
+# API
+# =========================
+
+@app.get("/")
+def root():
+    return {"message": "stock api server is running"}
+
+
+@app.get("/api/daily/{code}")
+def get_daily(code: str, refresh: int = 0):
+    code = str(code).zfill(6)
+    filename = f"daily_{code}.json"
+
+    if not refresh and not FORCE_LIVE_UPDATE["enabled"]:
+        cached = read_cache_json(filename)
+        if cached:
+            cached["cacheHit"] = True
+            return cached
+
+    live = get_daily_live(code)
+    write_cache_json(filename, live)
+    live["cacheHit"] = False
+    return live
+
+
+@app.get("/api/search")
+def search_stock(q: str):
+    try:
+        q = str(q or "").strip()
+        q_lower = q.lower()
+        stock_list = get_stock_list()
+
+        result = []
+
+        for item in stock_list:
+            name = str(item.get("name", "")).strip()
+            code = str(item.get("code", "")).strip()
+
+            name_lower = name.lower()
+            code_lower = code.lower()
+
+            matched = False
+            rank = 999
+
+            if q_lower and q_lower == code_lower:
+                matched = True
+                rank = 0
+            elif q_lower and q_lower == name_lower:
+                matched = True
+                rank = 1
+            elif q_lower and name_lower.startswith(q_lower):
+                matched = True
+                rank = 2
+            elif q_lower and q_lower in name_lower:
+                matched = True
+                rank = 3
+            elif q_lower and q_lower in code_lower:
+                matched = True
+                rank = 4
+
+            if matched:
+                result.append({**item, "searchRank": rank})
+
+        result = sorted(
+            result,
+            key=lambda item: (
+                item.get("searchRank", 999),
+                len(str(item.get("name", ""))),
+                item.get("name", "")
+            )
+        )
+
+        return {
+            "query": q,
+            "total_count": len(stock_list),
+            "count": len(result),
+            "data": result[:30]
+        }
+
+    except Exception as e:
+        return {"query": q, "count": 0, "data": [], "error": str(e)}
+
+
+@app.get("/api/theme/{code}")
+def get_theme(code: str, refresh: int = 0):
+    code = str(code).zfill(6)
+    filename = f"theme_{code}.json"
+
+    if not refresh and not FORCE_LIVE_UPDATE["enabled"]:
+        cached = read_cache_json(filename)
+        if cached:
+            cached["cacheHit"] = True
+            return cached
+
+    live = get_theme_live(code)
+    write_cache_json(filename, live)
+    live["cacheHit"] = False
+    return live
 
 
 @app.get("/api/investor/{code}")
-def get_investor(code: str):
-    try:
-        code = str(code).zfill(6)
-        df = fetch_naver_investor_data(code, pages=NAVER_LONG_TERM_PAGES)
-        market_cap = get_stock_market_cap(code)
+def get_investor(code: str, refresh: int = 0):
+    code = str(code).zfill(6)
+    filename = f"investor_{code}.json"
 
-        if df.empty:
-            return {
-                "code": code,
-                "summary": None,
-                "error": "네이버 수급 데이터를 찾지 못했습니다.",
-                "debug": {
-                    "source": "naver_frgn",
-                    "url": f"https://finance.naver.com/item/frgn.naver?code={code}",
-                    "message": "네이버 외국인·기관 매매동향 표를 읽지 못했습니다."
-                }
-            }
+    if not refresh and not FORCE_LIVE_UPDATE["enabled"]:
+        cached = read_cache_json(filename)
+        if cached:
+            cached["cacheHit"] = True
+            return cached
 
-        sum1 = sum_naver_investor_period(df, 1)
-        sum5 = sum_naver_investor_period(df, 5)
-        sum20 = sum_naver_investor_period(df, 20)
-
-        period_summary = {
-            label: sum_naver_investor_period(df, days)
-            for label, days in PERIOD_DAYS.items()
-        }
-
-        supply_strength = build_supply_strength_summary(period_summary, market_cap)
-        strength20 = supply_strength.get("1개월", {})
-
-        foreign_hold_change5 = calculate_foreign_hold_change(df, 5)
-        foreign_hold_change20 = calculate_foreign_hold_change(df, 20)
-
-        supply_score, signal = calculate_supply_score(
-            sum1,
-            sum5,
-            sum20,
-            strength20=strength20,
-            foreign_hold_change20=foreign_hold_change20
-        )
-
-        avg_cost = {
-            label: avg_cost_from_naver_period(df, days)
-            for label, days in PERIOD_DAYS.items()
-        }
-
-        last_row = df.iloc[-1]
-        last_date = str(last_row.get("dateText", ""))
-        foreign_hold_rate = safe_float(last_row.get("foreignHoldRate", 0))
-
-        recent_rows = []
-
-        for _, row in df.tail(20).iterrows():
-            recent_rows.append({
-                "date": str(row.get("dateText", "")),
-                "retail": int(row.get("retail", 0)),
-                "foreign": int(row.get("foreign", 0)),
-                "institution": int(row.get("institution", 0)),
-                "retailQty": int(row.get("retailQty", 0)),
-                "foreignQty": int(row.get("foreignQty", 0)),
-                "institutionQty": int(row.get("institutionQty", 0)),
-                "foreignHoldRate": safe_float(row.get("foreignHoldRate", 0)),
-                "close": int(row.get("close", 0)),
-            })
-
-        return {
-            "code": code,
-            "summary": {
-                "date": last_date,
-                "marketCap": market_cap,
-                "sum1": sum1,
-                "sum5": sum5,
-                "sum20": sum20,
-                "periodSummary": period_summary,
-                "supplyStrength": supply_strength,
-                "foreignHoldRate": foreign_hold_rate,
-                "foreignHoldRateChange5": foreign_hold_change5,
-                "foreignHoldRateChange20": foreign_hold_change20,
-                "supplyScore": supply_score,
-                "signal": signal,
-                "avgCost": avg_cost,
-            },
-            "recent": recent_rows,
-            "source": "naver_frgn_estimated",
-            "debug": {
-                "rows": len(df),
-                "firstDate": str(df.iloc[0].get("dateText", "")),
-                "lastDate": last_date,
-                "marketCap": market_cap,
-                "foreignHoldRate": foreign_hold_rate,
-                "foreignHoldRateChange5": foreign_hold_change5,
-                "foreignHoldRateChange20": foreign_hold_change20,
-                "note": "외국인·기관 순매수 금액은 네이버 순매매량 × 종가로 추정. 수급강도는 순매수 추정금액 / 시가총액 × 100. 외국인 보유율 변화는 %p 기준."
-            }
-        }
-
-    except Exception as e:
-        return {"code": code, "summary": None, "error": str(e)}
+    live = get_investor_live(code)
+    write_cache_json(filename, live)
+    live["cacheHit"] = False
+    return live
 
 
 @app.get("/api/program/{code}")
-def get_program(code: str):
-    try:
-        code = str(code).zfill(6)
-        df = fetch_naver_program_data(code, pages=NAVER_LONG_TERM_PAGES)
+def get_program(code: str, refresh: int = 0):
+    code = str(code).zfill(6)
+    filename = f"program_{code}.json"
 
-        if df.empty:
-            return {
-                "code": code,
-                "summary": None,
-                "error": "네이버 프로그램 매매 데이터를 찾지 못했습니다.",
-                "debug": {
-                    "source": "naver_program",
-                    "url": f"https://finance.naver.com/item/program.naver?code={code}",
-                    "message": "네이버 프로그램 매매동향 표를 읽지 못했습니다."
-                }
-            }
+    if not refresh and not FORCE_LIVE_UPDATE["enabled"]:
+        cached = read_cache_json(filename)
+        if cached:
+            cached["cacheHit"] = True
+            return cached
 
-        sum1 = sum_program_period(df, 1)
-        sum5 = sum_program_period(df, 5)
-        sum20 = sum_program_period(df, 20)
-
-        period_summary = {
-            label: sum_program_period(df, days)
-            for label, days in PERIOD_DAYS.items()
-        }
-
-        program_score, signal = calculate_program_score(sum1, sum5, sum20)
-
-        last_row = df.iloc[-1]
-        last_date = str(last_row.get("dateText", ""))
-
-        recent_rows = []
-
-        for _, row in df.tail(20).iterrows():
-            recent_rows.append({
-                "date": str(row.get("dateText", "")),
-                "close": int(row.get("close", 0)),
-                "quantity": int(row.get("quantity", 0)),
-                "amount": int(row.get("amount", 0)),
-            })
-
-        return {
-            "code": code,
-            "summary": {
-                "date": last_date,
-                "sum1": sum1,
-                "sum5": sum5,
-                "sum20": sum20,
-                "periodSummary": period_summary,
-                "programScore": program_score,
-                "signal": signal,
-            },
-            "recent": recent_rows,
-            "source": "naver_program_estimated",
-            "debug": {
-                "rows": len(df),
-                "firstDate": str(df.iloc[0].get("dateText", "")),
-                "lastDate": last_date,
-                "note": "프로그램 금액은 네이버 프로그램 순매매량 × 종가 기준 추정."
-            }
-        }
-
-    except Exception as e:
-        return {"code": code, "summary": None, "error": str(e)}
+    live = get_program_live(code)
+    write_cache_json(filename, live)
+    live["cacheHit"] = False
+    return live
 
 
 @app.get("/api/tickers-test")
@@ -1471,23 +1590,33 @@ def tickers_test():
 
 
 @app.get("/api/cache-clear")
-def cache_clear():
+def cache_clear(delete_files: int = 0):
     TICKER_CACHE["data"] = []
     THEME_CACHE["overrides"] = None
     THEME_CACHE["momentum"] = None
     THEME_CACHE["rules"] = None
 
-    return {"message": "ticker, theme, momentum and rules cache cleared"}
+    deleted = []
 
+    if delete_files:
+        try:
+            ensure_cache_dir()
+            for filename in os.listdir(CACHE_DIR):
+                if filename.endswith(".json"):
+                    path = os.path.join(CACHE_DIR, filename)
+                    os.remove(path)
+                    deleted.append(filename)
+        except Exception as e:
+            return {
+                "message": "memory cache cleared, file delete failed",
+                "error": str(e),
+                "deleted": deleted
+            }
 
-def read_cache_json(filename):
-    path = os.path.join(CACHE_DIR, filename)
-
-    if not os.path.exists(path):
-        return None
-
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return {
+        "message": "ticker, theme, momentum and rules cache cleared",
+        "deletedFiles": deleted
+    }
 
 
 @app.get("/api/cache/status")
@@ -1513,4 +1642,9 @@ def update_all_api(request: Request):
 
     from update_cache import update_all
 
-    return update_all()
+    FORCE_LIVE_UPDATE["enabled"] = True
+
+    try:
+        return update_all()
+    finally:
+        FORCE_LIVE_UPDATE["enabled"] = False
