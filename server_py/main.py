@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pykrx import stock
 from datetime import datetime, timedelta
 import pandas as pd
 import FinanceDataReader as fdr
 import os
+import json
 import requests
 from io import StringIO
 
@@ -26,6 +27,10 @@ THEME_OVERRIDE_PATH = os.path.join(BASE_DIR, "theme_override.csv")
 THEME_MOMENTUM_PATH = os.path.join(BASE_DIR, "theme_momentum.csv")
 MANUAL_THEME_PATH = os.path.join(BASE_DIR, "theme_override_manual.csv")
 THEME_RULES_PATH = os.path.join(BASE_DIR, "theme_rules.csv")
+STOCK_UNIVERSE_PATH = os.path.join(BASE_DIR, "stock_universe.json")
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
+
+UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "")
 
 TICKER_CACHE = {"data": []}
 
@@ -60,7 +65,7 @@ def safe_int(value):
     try:
         if pd.isna(value):
             return 0
-        return int(value)
+        return int(float(value))
     except Exception:
         return 0
 
@@ -484,9 +489,65 @@ def build_core_market_cap_top(peers, theme, limit=5):
     return pool[:limit]
 
 
+def load_stock_universe_from_json():
+    if not os.path.exists(STOCK_UNIVERSE_PATH):
+        return []
+
+    try:
+        with open(STOCK_UNIVERSE_PATH, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+
+        if not isinstance(raw_data, list):
+            return []
+
+        result = []
+
+        for row in raw_data:
+            code = str(row.get("code", "")).zfill(6)
+            name = str(row.get("name", "")).strip()
+            market = str(row.get("market", "KRX")).strip() or "KRX"
+            market_cap = safe_int(row.get("marketCap", 0))
+
+            if not code or not name or code == "000000":
+                continue
+
+            themes = get_themes_for_stock(code, name, market)
+
+            result.append({
+                "name": name,
+                "code": code,
+                "market": market,
+                "theme": themes[0] if themes else "미분류",
+                "themes": themes,
+                "selectedThemes": [],
+                "marketCap": market_cap,
+            })
+
+        for item in result:
+            selected_themes = select_top_themes_by_market_cap(
+                item.get("themes", []),
+                result,
+                limit=5
+            )
+            item["selectedThemes"] = selected_themes
+            item["theme"] = selected_themes[0] if selected_themes else item.get("theme", "미분류")
+
+        return result
+
+    except Exception as e:
+        print("stock_universe.json read error:", e)
+        return []
+
+
 def get_stock_list():
     if TICKER_CACHE["data"]:
         return TICKER_CACHE["data"]
+
+    static_list = load_stock_universe_from_json()
+
+    if static_list:
+        TICKER_CACHE["data"] = static_list
+        return static_list
 
     df = fdr.StockListing("KRX")
 
@@ -708,7 +769,6 @@ def calculate_foreign_hold_change(df, days):
 
     clean_df = df.copy()
     clean_df["foreignHoldRate"] = pd.to_numeric(clean_df["foreignHoldRate"], errors="coerce").fillna(0)
-
     clean_df = clean_df[clean_df["foreignHoldRate"] > 0].reset_index(drop=True)
 
     if len(clean_df) < 2:
@@ -1001,6 +1061,8 @@ def root():
 
 @app.get("/api/daily/{code}")
 def get_daily(code: str):
+    code = str(code).zfill(6)
+
     end = datetime.today()
     start = end - timedelta(days=900)
 
@@ -1416,16 +1478,6 @@ def cache_clear():
     THEME_CACHE["rules"] = None
 
     return {"message": "ticker, theme, momentum and rules cache cleared"}
-
-# =========================
-# 온라인 자동 업데이트 / 캐시 상태 API
-# =========================
-
-from fastapi import Request, HTTPException
-import json
-
-UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "")
-CACHE_DIR = os.path.join(BASE_DIR, "cache")
 
 
 def read_cache_json(filename):
