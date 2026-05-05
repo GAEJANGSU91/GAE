@@ -102,6 +102,7 @@ function formatMarketCap(n) {
   return `${Math.round(value / 10000).toLocaleString("ko-KR")}만`;
 }
 
+
 function formatSignedMoney(n) {
   const value = Number(n || 0);
   const sign = value > 0 ? "+" : value < 0 ? "-" : "";
@@ -112,6 +113,18 @@ function formatSignedMoney(n) {
   return `${sign}${abs.toLocaleString("ko-KR")}원`;
 }
 
+function formatSignedPercent(n, digits = 2) {
+  const value = Number(n || 0);
+  const sign = value > 0 ? "+" : value < 0 ? "" : "";
+  return `${sign}${value.toFixed(digits)}%`;
+}
+
+function formatSignedPoint(n, digits = 2) {
+  const value = Number(n || 0);
+  const sign = value > 0 ? "+" : value < 0 ? "" : "";
+  return `${sign}${value.toFixed(digits)}%p`;
+}
+
 function formatAvgCostCell(avgCostObj, fallback) {
   if (!avgCostObj || typeof avgCostObj !== "object") return fallback || "-";
   const price = avgCostObj.price || "-";
@@ -119,39 +132,41 @@ function formatAvgCostCell(avgCostObj, fallback) {
   return `${price} · ${side}`;
 }
 
+function formatMoneyWithStrength(amount, strength) {
+  const strengthNumber = Number(strength || 0);
+  const strengthText = Number.isFinite(strengthNumber) && Math.abs(strengthNumber) > 0
+    ? ` · 강도 ${formatSignedPercent(strengthNumber, 2)}`
+    : "";
+  return `${formatSignedMoney(amount)}${strengthText}`;
+}
+
 function calculateAtrPercentByDays(data, days) {
   const rows = Array.isArray(data) ? data.slice(-days) : [];
   if (rows.length < 2) return null;
-
   const trueRanges = [];
-
   for (let i = 1; i < rows.length; i += 1) {
     const current = rows[i];
     const prev = rows[i - 1];
-
     const high = Number(current.high || 0);
     const low = Number(current.low || 0);
     const prevClose = Number(prev.close || 0);
-
     if (!high || !low || !prevClose) continue;
-
-    const trueRange = Math.max(
-      high - low,
-      Math.abs(high - prevClose),
-      Math.abs(low - prevClose)
-    );
-
-    trueRanges.push(trueRange);
+    trueRanges.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
   }
-
   if (!trueRanges.length) return null;
-
   const atr = trueRanges.reduce((sum, value) => sum + value, 0) / trueRanges.length;
   const latestClose = Number(rows[rows.length - 1]?.close || 0);
-
   if (!latestClose) return null;
-
   return (atr / latestClose) * 100;
+}
+
+function getAtrStatus(atrPercent) {
+  if (atrPercent == null || !Number.isFinite(Number(atrPercent))) return { title: "계산 대기", sub: "일봉 데이터 필요", tone: "blue", score: 50 };
+  const atr = Number(atrPercent);
+  if (atr >= 10) return { title: "단타 위험", sub: `ATR ${atr.toFixed(1)}%`, tone: "rose", score: 35 };
+  if (atr >= 6) return { title: "변동성 큼", sub: `ATR ${atr.toFixed(1)}%`, tone: "rose", score: 50 };
+  if (atr >= 3) return { title: "보통", sub: `ATR ${atr.toFixed(1)}%`, tone: "blue", score: 75 };
+  return { title: "안정", sub: `ATR ${atr.toFixed(1)}%`, tone: "green", score: 85 };
 }
 
 function movingAverageAt(rows, index, period) {
@@ -193,7 +208,6 @@ function bucketClosePosition(value) {
 
 function makePatternFeature(rows, index) {
   if (!Array.isArray(rows) || index < 60 || index >= rows.length) return null;
-
   const row = rows[index];
   const prev = rows[index - 1];
   const close = Number(row.close || 0);
@@ -201,21 +215,16 @@ function makePatternFeature(rows, index) {
   const high = Number(row.high || 0);
   const low = Number(row.low || 0);
   const volume = Number(row.volume || 0);
-
   if (!close || !prevClose || !high || !low) return null;
-
   const ma5 = movingAverageAt(rows, index, 5);
   const ma20 = movingAverageAt(rows, index, 20);
   const ma60 = movingAverageAt(rows, index, 60);
   const ma5Prev = movingAverageAt(rows, index - 3, 5);
   const avgVol20 = averageVolumeAt(rows, index, 20);
-
   if (!ma5 || !ma20 || !ma60 || !avgVol20) return null;
-
   const returnPct = ((close - prevClose) / prevClose) * 100;
   const volumeRatio = volume / avgVol20;
   const closePosition = high === low ? 0.5 : (close - low) / (high - low);
-
   return {
     returnBucket: bucketReturn(returnPct),
     volumeBucket: bucketVolumeRatio(volumeRatio),
@@ -240,21 +249,12 @@ function similarityScore(a, b) {
   return score;
 }
 
-function calculateNextDayPatternStats(data, lookbackDays = 240) {
+function calculateNextDayPatternStats(data, lookbackDays = 260) {
   const rows = Array.isArray(data) ? data.slice(-lookbackDays) : [];
-  if (rows.length < 80) {
-    return { total: 0, up: 0, down: 0, flat: 0, upRate: null, score: 50, label: "데이터 부족" };
-  }
-
-  const currentIndex = rows.length - 1;
-  const currentFeature = makePatternFeature(rows, currentIndex);
-
-  if (!currentFeature) {
-    return { total: 0, up: 0, down: 0, flat: 0, upRate: null, score: 50, label: "계산 대기" };
-  }
-
+  if (rows.length < 80) return { total: 0, up: 0, down: 0, flat: 0, upRate: null, avgReturn: null, medianReturn: null, score: 50, label: "데이터 부족", reliability: "낮음" };
+  const currentFeature = makePatternFeature(rows, rows.length - 1);
+  if (!currentFeature) return { total: 0, up: 0, down: 0, flat: 0, upRate: null, avgReturn: null, medianReturn: null, score: 50, label: "계산 대기", reliability: "낮음" };
   const matches = [];
-
   for (let i = 60; i < rows.length - 1; i += 1) {
     const feature = makePatternFeature(rows, i);
     const score = similarityScore(currentFeature, feature);
@@ -262,36 +262,107 @@ function calculateNextDayPatternStats(data, lookbackDays = 240) {
       const todayClose = Number(rows[i].close || 0);
       const nextClose = Number(rows[i + 1].close || 0);
       if (!todayClose || !nextClose) continue;
-      const nextReturn = ((nextClose - todayClose) / todayClose) * 100;
-      matches.push({ score, nextReturn });
+      matches.push({ score, nextReturn: ((nextClose - todayClose) / todayClose) * 100 });
     }
   }
-
-  const pool = matches.length >= 10 ? matches : matches.concat(
-    Array.from({ length: 0 })
-  );
-
-  const up = pool.filter((item) => item.nextReturn > 0.2).length;
-  const down = pool.filter((item) => item.nextReturn < -0.2).length;
-  const flat = pool.length - up - down;
-  const upRate = pool.length ? (up / pool.length) * 100 : null;
-  const finalScore = upRate == null ? 50 : Math.round(upRate);
-
+  const up = matches.filter((item) => item.nextReturn > 0.2).length;
+  const down = matches.filter((item) => item.nextReturn < -0.2).length;
+  const flat = matches.length - up - down;
+  const upRate = matches.length ? (up / matches.length) * 100 : null;
+  const returns = matches.map((item) => item.nextReturn).sort((a, b) => a - b);
+  const avgReturn = returns.length ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null;
+  const medianReturn = returns.length ? (returns.length % 2 ? returns[Math.floor(returns.length / 2)] : (returns[returns.length / 2 - 1] + returns[returns.length / 2]) / 2) : null;
+  const reliability = matches.length >= 40 ? "높음" : matches.length >= 20 ? "보통" : matches.length >= 10 ? "낮음" : "매우 낮음";
+  let finalScore = upRate == null ? 50 : Math.round(upRate + (avgReturn > 0 ? 3 : avgReturn < 0 ? -3 : 0));
+  if (matches.length < 10) finalScore = Math.round((finalScore + 50) / 2);
   let label = "중립";
-  if (upRate != null && upRate >= 65) label = "상승 우세";
-  else if (upRate != null && upRate >= 55) label = "상승 약우세";
-  else if (upRate != null && upRate <= 35) label = "하락 우세";
-  else if (upRate != null && upRate <= 45) label = "하락 약우세";
+  if (matches.length < 10) label = "사례 부족";
+  else if (upRate >= 65) label = "상승 우세";
+  else if (upRate >= 55) label = "상승 약우세";
+  else if (upRate <= 35) label = "하락 우세";
+  else if (upRate <= 45) label = "하락 약우세";
+  return { total: matches.length, up, down, flat, upRate, avgReturn, medianReturn, score: clampScore(finalScore), label, reliability };
+}
 
-  return {
-    total: pool.length,
-    up,
-    down,
-    flat,
-    upRate,
-    score: finalScore,
-    label,
-  };
+function calculateVolumeValueStats(dailyData) {
+  if (!Array.isArray(dailyData) || dailyData.length < 25) return { volumeRatio: 1, valueRatio: 1, score: 50, label: "보통" };
+  const today = dailyData[dailyData.length - 1];
+  const prev20 = dailyData.slice(-21, -1);
+  const avgVolume20 = prev20.reduce((sum, row) => sum + Number(row.volume || 0), 0) / Math.max(1, prev20.length);
+  const avgValue20 = prev20.reduce((sum, row) => sum + Number(row.value || row.close * row.volume || 0), 0) / Math.max(1, prev20.length);
+  const volumeRatio = avgVolume20 ? Number(today.volume || 0) / avgVolume20 : 1;
+  const valueRatio = avgValue20 ? Number(today.value || today.close * today.volume || 0) / avgValue20 : 1;
+  const isUpCandle = Number(today.close || 0) >= Number(today.open || 0);
+  const isUpVsPrev = Number(today.close || 0) >= Number(dailyData[dailyData.length - 2]?.close || today.close || 0);
+  let score = 50;
+  if (volumeRatio >= 1.5) score += 12;
+  if (valueRatio >= 1.5) score += 12;
+  if (volumeRatio >= 2.5 && valueRatio >= 2.0) score += 8;
+  if (isUpCandle && isUpVsPrev && volumeRatio >= 1.2) score += 10;
+  if (!isUpCandle && volumeRatio >= 1.5) score -= 15;
+  if (!isUpVsPrev && valueRatio >= 1.5) score -= 10;
+  let label = "보통";
+  if (score >= 75) label = "강한 관심";
+  else if (score >= 60) label = "관심 증가";
+  else if (score <= 35) label = "매물 출회";
+  else if (score <= 45) label = "약함";
+  return { volumeRatio, valueRatio, score: clampScore(score), label };
+}
+
+function getSupplyStrengthValue(summary, periodLabel, investor) {
+  return Number(summary?.supplyStrength?.[periodLabel]?.[investor] || 0);
+}
+
+function calculateThemeStrengthStats(peerScores = [], marketCapTop = []) {
+  const validPeers = Array.isArray(peerScores) ? peerScores.filter(Boolean) : [];
+  const parsed = validPeers.map((item) => {
+    const change = Number(String(item.change || "0").replace("%", ""));
+    return { ...item, changeNumber: Number.isFinite(change) ? change : 0, scoreNumber: Number(item.score || 0) };
+  });
+  const total = parsed.length;
+  const upCount = parsed.filter((item) => item.changeNumber > 0).length;
+  const avgChange = total ? parsed.reduce((sum, item) => sum + item.changeNumber, 0) / total : 0;
+  const avgScore = total ? parsed.reduce((sum, item) => sum + item.scoreNumber, 0) / total : 50;
+  const topNames = new Set((marketCapTop || []).slice(0, 5).map((item) => String(item.name || "")));
+  const leaders = parsed.filter((item) => topNames.has(String(item.name || "")));
+  const leaderAvgChange = leaders.length ? leaders.reduce((sum, item) => sum + item.changeNumber, 0) / leaders.length : avgChange;
+  const upRate = total ? (upCount / total) * 100 : 50;
+  let score = 50 + (upRate - 50) * 0.35 + avgChange * 4 + (avgScore - 50) * 0.25 + leaderAvgChange * 3;
+  const finalScore = clampScore(score);
+  let label = "중립";
+  if (finalScore >= 75) label = "테마 강함";
+  else if (finalScore >= 62) label = "테마 우위";
+  else if (finalScore <= 35) label = "테마 약함";
+  else if (finalScore <= 45) label = "테마 둔화";
+  return { total, upCount, upRate, avgChange, avgScore, leaderAvgChange, score: finalScore, label };
+}
+
+function calculateEnhancedTradingScore({ dynamicScores, supplyScore, supplyStrength20, foreignHoldChange20, volumeStats, volumeProfileScore, volatilityScore, themeStrengthScore, nextDayStats }) {
+  const trendScore = Number(dynamicScores?.trend || 50);
+  const volumeScore = Number(volumeStats?.score || dynamicScores?.volume || 50);
+  const supplyBase = Number(supplyScore || dynamicScores?.supply || 50);
+  const smartStrength = Number(supplyStrength20?.foreign || 0) + Number(supplyStrength20?.institution || 0);
+  const supplyAdjusted = clampScore(supplyBase
+    + (smartStrength >= 1 ? 8 : smartStrength >= 0.5 ? 5 : smartStrength >= 0.2 ? 3 : smartStrength <= -1 ? -8 : smartStrength <= -0.5 ? -5 : smartStrength <= -0.2 ? -3 : 0)
+    + (Number(foreignHoldChange20 || 0) >= 0.5 ? 4 : Number(foreignHoldChange20 || 0) >= 0.2 ? 2 : Number(foreignHoldChange20 || 0) <= -0.5 ? -4 : Number(foreignHoldChange20 || 0) <= -0.2 ? -2 : 0));
+  const profileScore = Number(volumeProfileScore || dynamicScores?.volumeProfile || 50);
+  const volScore = Number(volatilityScore || dynamicScores?.volatility || 50);
+  const themeScore = Number(themeStrengthScore || dynamicScores?.theme || 50);
+  const nextDayScore = Number(nextDayStats?.score || 50);
+  const finalScore = clampScore(trendScore * 0.25 + volumeScore * 0.20 + supplyAdjusted * 0.20 + profileScore * 0.15 + volScore * 0.10 + themeScore * 0.07 + nextDayScore * 0.03);
+  const parts = { trend: clampScore(trendScore), volume: clampScore(volumeScore), supply: supplyAdjusted, volumeProfile: clampScore(profileScore), volatility: clampScore(volScore), theme: clampScore(themeScore), nextDay: clampScore(nextDayScore) };
+  const strengths = [];
+  const weaknesses = [];
+  if (parts.trend >= 65) strengths.push("추세 구조 우위"); else if (parts.trend <= 45) weaknesses.push("추세 약세");
+  if (parts.volume >= 65) strengths.push(`거래량·거래대금 ${volumeStats?.label || "증가"}`); else if (parts.volume <= 45) weaknesses.push("거래량 신뢰도 낮음");
+  if (parts.supply >= 65) strengths.push(`수급 점수 ${parts.supply}점`); else if (parts.supply <= 45) weaknesses.push("수급 약세");
+  if (smartStrength >= 0.2) strengths.push(`외국인+기관 1개월 강도 ${formatSignedPercent(smartStrength, 2)}`); else if (smartStrength <= -0.2) weaknesses.push(`외국인+기관 1개월 강도 ${formatSignedPercent(smartStrength, 2)}`);
+  if (Number(foreignHoldChange20 || 0) >= 0.2) strengths.push(`외국인 보유율 20일 ${formatSignedPoint(foreignHoldChange20)}`); else if (Number(foreignHoldChange20 || 0) <= -0.2) weaknesses.push(`외국인 보유율 20일 ${formatSignedPoint(foreignHoldChange20)}`);
+  if (parts.volumeProfile >= 65) strengths.push("매물대 여유 양호"); else if (parts.volumeProfile <= 45) weaknesses.push("가까운 저항 부담");
+  if (parts.volatility <= 40) weaknesses.push("변동성 과다"); else if (parts.volatility >= 70) strengths.push("변동성 안정");
+  if (parts.theme >= 65) strengths.push("테마 동조 강함"); else if (parts.theme <= 45) weaknesses.push("테마 동조 약함");
+  if (nextDayStats?.total >= 10 && nextDayStats.upRate >= 60) strengths.push(`유사패턴 상승 ${nextDayStats.upRate.toFixed(0)}%`); else if (nextDayStats?.total >= 10 && nextDayStats.upRate <= 45) weaknesses.push(`유사패턴 상승 ${nextDayStats.upRate.toFixed(0)}%`);
+  return { score: finalScore, label: scoreText(finalScore), parts, strengths: strengths.slice(0, 4), weaknesses: weaknesses.slice(0, 4) };
 }
 
 function PeriodSummaryTable({ rows, labels }) {
@@ -302,44 +373,21 @@ function PeriodSummaryTable({ rows, labels }) {
           <h3 className="text-base font-black text-slate-950">기간별 수급·변동성 요약</h3>
           <p className="text-xs font-bold text-slate-500">1주·1개월·3개월·6개월·1년·2년 기준 한눈에 보기</p>
         </div>
-        <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-500">
-          1주=5거래일
-        </span>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-500">1주=5거래일</span>
       </div>
-
       <div className="overflow-x-auto rounded-2xl ring-1 ring-slate-100">
-        <div
-          className="grid min-w-[760px] bg-slate-50 text-xs font-black text-slate-500"
-          style={{ gridTemplateColumns: `minmax(96px, 1.1fr) repeat(${labels.length}, minmax(92px, 1fr))` }}
-        >
+        <div className="grid min-w-[760px] bg-slate-50 text-xs font-black text-slate-500" style={{ gridTemplateColumns: `minmax(96px, 1.1fr) repeat(${labels.length}, minmax(92px, 1fr))` }}>
           <div className="p-3">구분</div>
-          {labels.map((label) => (
-            <div key={label} className="p-3 text-right">{label}</div>
-          ))}
+          {labels.map((label) => <div key={label} className="p-3 text-right">{label}</div>)}
         </div>
-
         {rows.map((row) => (
-          <div
-            key={row.label}
-            className="grid min-w-[760px] border-t border-slate-100 text-sm"
-            style={{ gridTemplateColumns: `minmax(96px, 1.1fr) repeat(${labels.length}, minmax(92px, 1fr))` }}
-          >
+          <div key={row.label} className="grid min-w-[760px] border-t border-slate-100 text-sm" style={{ gridTemplateColumns: `minmax(96px, 1.1fr) repeat(${labels.length}, minmax(92px, 1fr))` }}>
             <div className="p-3 font-black text-slate-800">{row.label}</div>
-            {labels.map((label) => (
-              <div
-                key={`${row.label}-${label}`}
-                className={`p-3 text-right font-black ${row.tones?.[label] || "text-slate-900"}`}
-              >
-                {row.values?.[label] ?? "-"}
-              </div>
-            ))}
+            {labels.map((label) => <div key={`${row.label}-${label}`} className={`p-3 text-right font-black ${row.tones?.[label] || "text-slate-900"}`}>{row.values?.[label] ?? "-"}</div>)}
           </div>
         ))}
       </div>
-
-      <p className="mt-2 text-[11px] font-semibold text-slate-400">
-        기관·외국인 금액은 순매매량 × 종가 기준 추정값입니다. 변동성은 ATR% 기준입니다.
-      </p>
+      <p className="mt-2 text-[11px] font-semibold text-slate-400">기관·외국인 금액은 순매매량 × 종가 기준 추정값입니다. 변동성은 ATR% 기준입니다.</p>
     </div>
   );
 }
@@ -524,6 +572,15 @@ function calculateDynamicLevels(dailyData, lookbackDays = 60) {
 
   const resistancePrice = nearestAbove ? roundToTick(nearestAbove.mid) : roundToTick(periodHigh);
   const supportPrice = nearestBelow ? roundToTick(nearestBelow.mid) : roundToTick(periodLow);
+  const resistanceDistancePct = resistancePrice && close ? ((resistancePrice - close) / close) * 100 : null;
+  const supportDistancePct = supportPrice && close ? ((supportPrice - close) / close) * 100 : null;
+  const maxZoneMid = maxVolumeZone ? roundToTick(maxVolumeZone.mid) : null;
+  const maxZoneDistancePct = maxZoneMid && close ? ((maxZoneMid - close) / close) * 100 : null;
+  const formatZoneDesc = (zone, distancePct, fallbackText) => {
+    if (!zone || distancePct == null) return fallbackText;
+    const volumeText = Number(zone.volume || 0) > 0 ? `누적거래량 ${formatVolumeCompact(zone.volume)}` : "누적거래량 산출";
+    return `현재가 대비 ${formatSignedPercent(distancePct, 1)} · ${volumeText}`;
+  };
 
   // 1) 상승 확인선: 내일 바로 확인 가능한 가장 가까운 저항.
   // 전일 고가, 단기 이평선, 가까운 매물대, 현재가+0.5ATR 중 현재가 위에 있는 가장 가까운 값을 사용한다.
@@ -616,6 +673,12 @@ function calculateDynamicLevels(dailyData, lookbackDays = 60) {
     resistance: nearestAbove ? nearestAbove.label : `${formatPrice(roundToTick(periodHigh))} 부근`,
     support: nearestBelow ? nearestBelow.label : `${formatPrice(roundToTick(periodLow))} 부근`,
     maxVolumeZone: maxVolumeZone ? maxVolumeZone.label : "-",
+    resistanceDistancePct,
+    supportDistancePct,
+    maxZoneDistancePct,
+    resistanceDesc: formatZoneDesc(nearestAbove, resistanceDistancePct, "선택 기간 기준 최근 고점 부근"),
+    supportDesc: formatZoneDesc(nearestBelow, supportDistancePct, "선택 기간 기준 최근 저점 부근"),
+    maxVolumeZoneDesc: maxVolumeZone ? formatZoneDesc(maxVolumeZone, maxZoneDistancePct, "거래량 최대 구간") : "거래량 최대 구간",
     confirmPrice,
     breakoutPrice,
     pullbackLow,
@@ -717,7 +780,7 @@ function CandleChart({ data, months, levels, volumes = [] }) {
     .reverse();
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-[520px] w-full rounded-2xl bg-white">
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-[780px] w-full rounded-2xl bg-white">
       <rect x="0" y="0" width={width} height={height} fill="white" />
 
       <defs>
@@ -1134,72 +1197,6 @@ function normalizeThemeKey(theme) {
   return theme;
 }
 
-function getThemeRelevanceScore(theme, name) {
-  const t = String(theme || "");
-  const n = String(name || "");
-  let score = 50;
-
-  const hasAny = (words) => words.some((word) => n.includes(word));
-
-  if (/태양광|신재생|에너지/.test(t)) {
-    if (hasAny(["한화솔루션", "HD현대에너지솔루션", "OCI", "신성이엔지", "SDN", "에스에너지", "대명에너지", "SK이터닉스", "윌링스", "파루", "지투파워"])) score += 45;
-    if (hasAny(["솔루션", "에너지", "태양", "OCI", "신성", "SDN"])) score += 20;
-    if (hasAny(["삼성물산", "현대차", "기아", "현대모비스", "포스코홀딩스", "LG화학", "삼성전자", "SK하이닉스"])) score -= 45;
-  }
-
-  if (/수소|연료전지/.test(t)) {
-    if (hasAny(["두산퓨얼셀", "에스퓨얼셀", "범한퓨얼셀", "비나텍", "제이엔케이히터", "일진하이솔루스", "현대차", "효성중공업", "한화솔루션"])) score += 45;
-    if (hasAny(["퓨얼셀", "수소", "하이솔루스", "비나텍", "효성", "현대차"])) score += 20;
-    if (hasAny(["삼성물산", "삼성전자", "SK하이닉스", "NAVER", "카카오"])) score -= 35;
-  }
-
-  if (/2차전지|배터리|음극재|양극재/.test(t)) {
-    if (hasAny(["LG에너지솔루션", "삼성SDI", "에코프로", "에코프로비엠", "포스코퓨처엠", "대주전자재료", "엘앤에프", "엔켐", "천보", "나노신소재", "후성"])) score += 45;
-    if (hasAny(["에너지솔루션", "SDI", "에코프로", "퓨처엠", "전자재료", "엘앤에프", "엔켐", "천보", "소재"])) score += 20;
-    if (hasAny(["삼성물산", "현대차", "기아", "NAVER", "카카오"])) score -= 35;
-  }
-
-  if (/반도체|HBM|AI반도체/.test(t)) {
-    if (hasAny(["삼성전자", "SK하이닉스", "한미반도체", "리노공업", "ISC", "HPSP", "DB하이텍", "원익IPS", "주성엔지니어링", "이오테크닉스", "테스", "유진테크"])) score += 45;
-    if (hasAny(["반도체", "하이닉스", "전자", "하이텍", "테크", "공업", "IPS", "ISC", "HPSP"])) score += 15;
-    if (hasAny(["삼성물산", "현대차", "기아", "셀트리온"])) score -= 30;
-  }
-
-  if (/바이오|제약|신약/.test(t)) {
-    if (hasAny(["셀트리온", "삼성바이오", "삼천당제약", "퓨쳐켐", "알테오젠", "리가켐바이오", "유한양행", "한미약품", "종근당", "대웅제약", "보령", "HLB"])) score += 45;
-    if (hasAny(["바이오", "제약", "켐", "팜", "메디", "신약"])) score += 20;
-    if (hasAny(["삼성물산", "현대차", "기아", "삼성전자", "SK하이닉스"])) score -= 35;
-  }
-
-  if (/건설|해외수주|재건|시멘트|레미콘/.test(t)) {
-    if (hasAny(["현대건설", "대우건설", "GS건설", "DL이앤씨", "HDC현대산업개발", "삼성E&A", "금호건설", "계룡건설", "코오롱글로벌", "동부건설", "쌍용C&E", "한일시멘트", "아세아시멘트"])) score += 45;
-    if (hasAny(["건설", "E&A", "이앤씨", "산업개발", "시멘트", "레미콘"])) score += 20;
-    if (hasAny(["삼성전자", "SK하이닉스", "NAVER", "카카오", "셀트리온"])) score -= 35;
-  }
-
-  return Math.max(0, Math.min(100, score));
-}
-
-function getCoreMarketCapTop(peers, theme) {
-  const scored = [...(peers || [])]
-    .filter((item) => Number(item.marketCap || 0) > 0)
-    .map((item) => ({
-      ...item,
-      relevanceScore: item._demoted ? 0 : getThemeRelevanceScore(theme, item.name),
-    }));
-
-  const core = scored.filter((item) => item.relevanceScore >= 70);
-  const pool = core.length >= 5 ? core : scored;
-
-  return pool
-    .sort((a, b) => {
-      const scoreDiff = Number(b.relevanceScore || 0) - Number(a.relevanceScore || 0);
-      if (scoreDiff !== 0) return scoreDiff;
-      return Number(b.marketCap || 0) - Number(a.marketCap || 0);
-    })
-    .slice(0, 5);
-}
-
 function ThemePeerScores({
   theme,
   stockName,
@@ -1217,7 +1214,6 @@ function ThemePeerScores({
   const normalizedTheme = normalizeThemeKey(theme);
   const finalTheme = normalizedTheme === "미분류" ? inferredTheme : normalizedTheme;
   const fallbackData = THEME_SCORE_MAP[finalTheme] || THEME_SCORE_MAP["미분류"];
-
   const hiddenThemesForStock = new Set((demotedThemesByStock?.[String(stockName || "")] || []).map(String));
   const visibleThemeGroups = themeGroups
     .map((group, originalIndex) => ({ ...group, originalIndex }))
@@ -1225,46 +1221,31 @@ function ThemePeerScores({
   const fallbackGroup = visibleThemeGroups[0] || themeGroups[0] || null;
   const rawActiveGroup = themeGroups[activeThemeIndex] || fallbackGroup;
   const activeGroup = rawActiveGroup && hiddenThemesForStock.has(String(rawActiveGroup.theme)) ? fallbackGroup : rawActiveGroup;
-  const activeTheme = activeGroup?.theme || finalTheme || "미분류";
-  const activeGroupPeers = Array.isArray(activeGroup?.peers) ? activeGroup.peers : [];
-  const demotedCodesForTheme = new Set((demotedThemeCodes?.[activeTheme] || []).map(String));
-  const adjustedActiveGroupPeers = activeGroupPeers.map((item) => ({
+  const displayTheme = activeGroup?.theme || finalTheme || "미분류";
+  const demotedCodesForTheme = new Set((demotedThemeCodes?.[displayTheme] || []).map(String));
+  const adjustedPeerScores = [...peerScores].map((item) => ({
     ...item,
+    score: demotedCodesForTheme.has(String(item.code)) ? 0 : item.score,
     _demoted: demotedCodesForTheme.has(String(item.code)),
   }));
-
-  const backendCoreMarketCapTop = Array.isArray(activeGroup?.coreMarketCapTop)
-    ? activeGroup.coreMarketCapTop
-    : [];
-
-  const marketCapTopFromTheme = demotedCodesForTheme.size === 0 && backendCoreMarketCapTop.length
-    ? backendCoreMarketCapTop
-    : getCoreMarketCapTop(adjustedActiveGroupPeers, activeTheme);
-
-  const scoredPeerScores = [...peerScores].map((item) => ({
-    ...item,
-    relevanceScore: demotedCodesForTheme.has(String(item.code))
-      ? 0
-      : Number(item.relevanceScore || 0) || getThemeRelevanceScore(activeTheme, item.name),
-  }));
-
-  const corePeerScores = scoredPeerScores.filter((item) => Number(item.relevanceScore || 0) >= 70);
-  const scorePool = corePeerScores.length > 0 ? corePeerScores : scoredPeerScores;
-
-  const hasRealPeerScores = scorePool.length > 0;
+  const hasRealPeerScores = adjustedPeerScores.length > 0;
+  const backendCoreMarketCapTop = Array.isArray(activeGroup?.coreMarketCapTop) ? activeGroup.coreMarketCapTop : [];
+  const marketCapTop = backendCoreMarketCapTop.length
+    ? backendCoreMarketCapTop.filter((item) => !demotedCodesForTheme.has(String(item.code))).slice(0, 5)
+    : adjustedPeerScores
+        .filter((item) => Number(item.marketCap || 0) > 0)
+        .sort((a, b) => Number(b.marketCap || 0) - Number(a.marketCap || 0))
+        .slice(0, 5);
   const data = hasRealPeerScores
     ? {
-        top: [...scorePool].sort((a, b) => b.score - a.score).slice(0, 5),
-        bottom: [...scorePool].sort((a, b) => a.score - b.score).slice(0, 5),
-        marketCapTop: marketCapTopFromTheme,
+        top: [...adjustedPeerScores].sort((a, b) => b.score - a.score).slice(0, 5),
+        bottom: [...adjustedPeerScores].sort((a, b) => a.score - b.score).slice(0, 5),
+        marketCapTop,
       }
     : {
         ...fallbackData,
-        marketCapTop: marketCapTopFromTheme.length ? marketCapTopFromTheme : fallbackData.top,
+        marketCapTop: marketCapTop.length ? marketCapTop : fallbackData.top,
       };
-
-  const displayTheme = activeTheme;
-
   const Row = ({ item, rank, weak = false }) => (
     <div className="flex items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 ring-1 ring-slate-100">
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -1275,14 +1256,7 @@ function ThemePeerScores({
         <span className={`text-[clamp(10px,0.9vw,12px)] font-black ${item.change?.startsWith("+") ? "text-rose-600" : "text-blue-600"}`}>{item.change || "-"}</span>
         <span className={`rounded-lg px-2 py-1 text-[clamp(10px,0.9vw,12px)] font-black ${weak ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"}`}>{item.score}점</span>
         {item.code && (
-          <button
-            type="button"
-            title="이 종목을 이 테마 우선순위에서 뒤로 밀기"
-            onClick={() => onDemotePeer(activeTheme, item)}
-            className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-xs font-black text-slate-500 hover:bg-rose-50 hover:text-rose-600"
-          >
-            -
-          </button>
+          <button type="button" title="이 종목을 이 테마 우선순위에서 뒤로 밀기" onClick={() => onDemotePeer(displayTheme, item)} className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-xs font-black text-slate-500 hover:bg-rose-50 hover:text-rose-600">-</button>
         )}
       </div>
     </div>
@@ -1298,25 +1272,18 @@ function ThemePeerScores({
         {formatMarketCap(item.marketCap)}
       </span>
       {item.code && (
-        <button
-          type="button"
-          title="이 종목을 이 테마 우선순위에서 뒤로 밀기"
-          onClick={() => onDemotePeer(activeTheme, item)}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-black text-slate-500 hover:bg-rose-50 hover:text-rose-600"
-        >
-          -
-        </button>
+        <button type="button" title="이 종목을 이 테마 우선순위에서 뒤로 밀기" onClick={() => onDemotePeer(displayTheme, item)} className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-black text-slate-500 hover:bg-rose-50 hover:text-rose-600">-</button>
       )}
     </div>
   );
 
   return (
-    <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+    <div className="mt-5 rounded-2xl bg-slate-50 p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <h3 className="text-lg font-black text-slate-950">테마 유사 종목 매매 점수</h3>
           <p className="text-xs font-bold text-slate-500">
-            {displayTheme} · {stockName} 기준 · {hasRealPeerScores ? "관련도 보정 실제 점수" : peerLoading ? "불러오는 중" : "예시 데이터"}
+            {displayTheme} · {stockName} 기준 · {hasRealPeerScores ? "실제 일봉 점수" : peerLoading ? "불러오는 중" : "예시 데이터"}
           </p>
           {visibleThemeGroups.length > 1 && (
             <div className="mt-3 flex flex-wrap gap-2">
@@ -1326,54 +1293,45 @@ function ThemePeerScores({
                     type="button"
                     onClick={() => onSelectThemeIndex(group.originalIndex)}
                     className={`px-3 py-1.5 text-xs font-black transition ${
-                      activeTheme === group.theme
-                        ? "bg-slate-950 text-white"
-                        : "bg-white text-slate-600 hover:bg-slate-50"
+                      displayTheme === group.theme ? "bg-slate-950 text-white" : "bg-white text-slate-600 hover:bg-slate-50"
                     }`}
                   >
                     {group.theme}
                     {Number(group.themeMarketCap || 0) > 0 ? ` · ${formatMarketCap(group.themeMarketCap)}` : ""}
                   </button>
-                  <button
-                    type="button"
-                    title="이 종목에서 이 테마 숨기기"
-                    onClick={() => onDemoteTheme(stockName, group.theme)}
-                    className="h-full bg-slate-100 px-2 py-1.5 text-xs font-black text-slate-500 hover:bg-rose-50 hover:text-rose-600"
-                  >
-                    -
-                  </button>
+                  <button type="button" title="이 종목에서 이 테마 숨기기" onClick={() => onDemoteTheme(stockName, group.theme)} className="h-full bg-slate-100 px-2 py-1.5 text-xs font-black text-slate-500 hover:bg-rose-50 hover:text-rose-600">-</button>
                 </div>
               ))}
             </div>
           )}
         </div>
         <span className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-slate-500 ring-1 ring-slate-200">
-          {peerLoading ? "계산 중" : "핵심 상위·하위 / 핵심 시총"}
+          {peerLoading ? "계산 중" : "점수 상위·하위 / 시총 상위"}
         </span>
       </div>
       <div className="grid gap-4 xl:grid-cols-3">
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-black text-emerald-700">핵심 상위 5개</p>
-            <p className="text-xs font-bold text-slate-400">관련도 보정</p>
+            <p className="text-sm font-black text-emerald-700">상위 5개</p>
+            <p className="text-xs font-bold text-slate-400">강한 종목</p>
           </div>
           <div className="space-y-2">
-            {data.top.map((item, idx) => <Row key={`${item.name}-top`} item={item} rank={idx + 1} />)}
+            {data.top.map((item, idx) => <Row key={item.name} item={item} rank={idx + 1} />)}
           </div>
         </div>
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-black text-rose-700">핵심 하위 5개</p>
-            <p className="text-xs font-bold text-slate-400">관련도 보정</p>
+            <p className="text-sm font-black text-rose-700">하위 5개</p>
+            <p className="text-xs font-bold text-slate-400">약한 종목</p>
           </div>
           <div className="space-y-2">
-            {data.bottom.map((item, idx) => <Row key={`${item.name}-bottom`} item={item} rank={idx + 1} weak />)}
+            {data.bottom.map((item, idx) => <Row key={item.name} item={item} rank={idx + 1} weak />)}
           </div>
         </div>
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-black text-blue-700">핵심 시총 상위 5개</p>
-            <p className="text-xs font-bold text-slate-400">백엔드 룰 기준</p>
+            <p className="text-sm font-black text-blue-700">시총 상위 5개</p>
+            <p className="text-xs font-bold text-slate-400">테마 대형주</p>
           </div>
           <div className="space-y-2">
             {data.marketCapTop?.length ? data.marketCapTop.map((item, idx) => <MarketCapRow key={`${item.name}-cap`} item={item} rank={idx + 1} />) : (
@@ -1583,18 +1541,10 @@ export default function App() {
   const [themeGroups, setThemeGroups] = useState([]);
   const [activeThemeIndex, setActiveThemeIndex] = useState(0);
   const [themeDemotions, setThemeDemotions] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("themeDemotions") || "{}");
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(localStorage.getItem("themeDemotions") || "{}"); } catch { return {}; }
   });
   const [themeHiddenByStock, setThemeHiddenByStock] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("themeHiddenByStock") || "{}");
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(localStorage.getItem("themeHiddenByStock") || "{}"); } catch { return {}; }
   });
   const [peerLoading, setPeerLoading] = useState(false);
   const [chartMonths, setChartMonths] = useState(3);
@@ -1604,7 +1554,6 @@ export default function App() {
   const [investorData, setInvestorData] = useState(null);
   const [investorLoading, setInvestorLoading] = useState(false);
   const [investorError, setInvestorError] = useState("");
-  
 
   const defaultScores = STOCKS["한화솔루션"].scores;
   const defaultAvgCost = STOCKS["한화솔루션"].avgCost;
@@ -1658,7 +1607,6 @@ export default function App() {
     return () => { cancelled = true; };
   }, [stock.code]);
 
-
   const candleData = useMemo(() => {
     if (dailyData.length > 0) return dailyData.map((d) => [d.open, d.high, d.low, d.close]);
     return stock.fallbackCandles;
@@ -1682,28 +1630,16 @@ export default function App() {
   const changeRate = latest && prev ? ((latest.close - prev.close) / prev.close) * 100 : 0;
   const changeAmount = latest && prev ? latest.close - prev.close : 0;
   const isUp = changeRate >= 0;
-  const chartLookbackDays = chartMonths === 0.25 ? 5 : chartMonths * 20;
+  const chartLookbackDays = chartMonths === 0.25 ? 5 : chartMonths === 12 ? 240 : chartMonths === 24 ? 480 : chartMonths * 20;
   const chartPeriodLabel = chartMonths === 0.25 ? "1주" : chartMonths === 12 ? "1년" : chartMonths === 24 ? "2년" : `${chartMonths}개월`;
   const levels = useMemo(() => calculateDynamicLevels(dailyData, chartLookbackDays), [dailyData, chartLookbackDays]);
   const dynamicScores = useMemo(() => calculateTradingScores(dailyData, stock, levels), [dailyData, stock, levels]);
-  const averageScore = useMemo(() => Math.round(Object.values(dynamicScores).reduce((a, b) => a + b, 0) / Object.values(dynamicScores).length), [dynamicScores]);
-  const recentFiveScores = useMemo(() => {
-    const offsets = isUp ? [-7, -5, -3, -4, -2] : [8, 6, 4, 5, 3];
-    return offsets.map((offset, idx) => ({
-      day: `D-${5 - idx}`,
-      score: Math.max(0, Math.min(100, averageScore + offset)),
-    }));
-  }, [averageScore, isUp]);
-  const avgCostPeriod = chartPeriodLabel;
+  const activeThemeGroup = themeGroups[activeThemeIndex] || themeGroups[0] || null;
+  const activeCoreMarketCapTop = Array.isArray(activeThemeGroup?.coreMarketCapTop) ? activeThemeGroup.coreMarketCapTop : [];
+  const themeStrengthStats = useMemo(() => calculateThemeStrengthStats(peerScores, activeCoreMarketCapTop), [peerScores, activeCoreMarketCapTop]);
   const currentAtrPercent = calculateAtrPercentByDays(dailyData, chartLookbackDays);
-  const volatilityStatus = currentAtrPercent == null
-    ? { title: "계산 대기", sub: "일봉 데이터 필요", tone: "blue" }
-    : currentAtrPercent >= 8
-      ? { title: "높음", sub: `ATR ${currentAtrPercent.toFixed(1)}%`, tone: "rose" }
-      : currentAtrPercent >= 5
-        ? { title: "보통", sub: `ATR ${currentAtrPercent.toFixed(1)}%`, tone: "blue" }
-        : { title: "낮음", sub: `ATR ${currentAtrPercent.toFixed(1)}%`, tone: "green" };
-
+  const volatilityStatus = getAtrStatus(currentAtrPercent);
+  const volumeStats = useMemo(() => calculateVolumeValueStats(dailyData), [dailyData]);
   const investorSummary = investorData?.summary || null;
   const institutionNet20 = Number(investorSummary?.sum20?.institution || 0);
   const foreignNet20 = Number(investorSummary?.sum20?.foreign || 0);
@@ -1716,20 +1652,43 @@ export default function App() {
   const institutionStatus = getNetBuyStatus(institutionNet20);
   const foreignStatus = getNetBuyStatus(foreignNet20);
   const foreignHoldRate = Number(investorSummary?.foreignHoldRate || 0);
-  const foreignStatusSub = foreignHoldRate > 0
-    ? `${foreignStatus.sub} · 보유 ${foreignHoldRate.toFixed(2)}%`
-    : foreignStatus.sub;
-
+  const foreignHoldChange5 = Number(investorSummary?.foreignHoldRateChange5 || 0);
+  const foreignHoldChange20 = Number(investorSummary?.foreignHoldRateChange20 || 0);
+  const foreignStrength20 = getSupplyStrengthValue(investorSummary, "1개월", "foreign");
+  const institutionStrength20 = getSupplyStrengthValue(investorSummary, "1개월", "institution");
+  const foreignStatusSub = foreignHoldRate > 0 ? `${foreignStatus.sub} · 보유 ${foreignHoldRate.toFixed(2)}% · 20일 ${formatSignedPoint(foreignHoldChange20)}` : foreignStatus.sub;
+  const institutionStatusSub = investorSummary ? `${institutionStatus.sub} · 강도 ${formatSignedPercent(institutionStrength20, 2)}` : institutionStatus.sub;
   const nextDayStats = calculateNextDayPatternStats(dailyData, 260);
   const nextDayStatus = (() => {
     if (!dailyData?.length) return { title: "계산 대기", sub: "일봉 데이터 필요", tone: "slate" };
     if (!nextDayStats.total) return { title: nextDayStats.label, sub: "유사 조건 부족", tone: "slate" };
-    const sub = `${nextDayStats.upRate.toFixed(0)}% · ${nextDayStats.up}승 ${nextDayStats.down}패`;
+    const avgText = nextDayStats.avgReturn == null ? "평균 -" : `평균 ${formatSignedPercent(nextDayStats.avgReturn, 2)}`;
+    const medianText = nextDayStats.medianReturn == null ? "중앙값 -" : `중앙값 ${formatSignedPercent(nextDayStats.medianReturn, 2)}`;
+    const sub = `${nextDayStats.upRate.toFixed(0)}% · ${nextDayStats.up}승 ${nextDayStats.down}패 · ${avgText} · ${medianText} · ${nextDayStats.total}건`;
     if (nextDayStats.upRate >= 60) return { title: nextDayStats.label, sub, tone: "red" };
     if (nextDayStats.upRate <= 45) return { title: nextDayStats.label, sub, tone: "blue" };
     return { title: nextDayStats.label, sub, tone: "slate" };
   })();
-
+  const enhancedScore = useMemo(() => calculateEnhancedTradingScore({
+    dynamicScores,
+    supplyScore: investorSummary?.supplyScore,
+    supplyStrength20: investorSummary?.supplyStrength?.["1개월"],
+    foreignHoldChange20,
+    volumeStats,
+    volumeProfileScore: dynamicScores?.volumeProfile,
+    volatilityScore: volatilityStatus.score,
+    themeStrengthScore: themeStrengthStats.score,
+    nextDayStats,
+  }), [dynamicScores, investorSummary, foreignHoldChange20, volumeStats, volatilityStatus.score, themeStrengthStats.score, nextDayStats]);
+  const averageScore = enhancedScore.score;
+  const recentFiveScores = useMemo(() => {
+    const offsets = isUp ? [-7, -5, -3, -4, -2] : [8, 6, 4, 5, 3];
+    return offsets.map((offset, idx) => ({
+      day: `D-${5 - idx}`,
+      score: Math.max(0, Math.min(100, averageScore + offset)),
+    }));
+  }, [averageScore, isUp]);
+  const avgCostPeriod = chartPeriodLabel;
   const periodLabels = ["1주", "1개월", "3개월", "6개월", "1년", "2년"];
   const periodDays = { "1주": 5, "1개월": 20, "3개월": 60, "6개월": 120, "1년": 240, "2년": 480 };
   const moneyTone = (value) => Number(value || 0) > 0 ? "text-rose-600" : Number(value || 0) < 0 ? "text-blue-600" : "text-slate-500";
@@ -1749,23 +1708,17 @@ export default function App() {
       label: "기관 순매수",
       values: Object.fromEntries(periodLabels.map((label) => [
         label,
-        formatSignedMoney(investorSummary?.periodSummary?.[label]?.institution || 0),
+        formatMoneyWithStrength(investorSummary?.periodSummary?.[label]?.institution || 0, investorSummary?.supplyStrength?.[label]?.institution || 0),
       ])),
-      tones: Object.fromEntries(periodLabels.map((label) => [
-        label,
-        moneyTone(investorSummary?.periodSummary?.[label]?.institution || 0),
-      ])),
+      tones: Object.fromEntries(periodLabels.map((label) => [label, moneyTone(investorSummary?.periodSummary?.[label]?.institution || 0)])),
     },
     {
       label: "외국인 순매수",
       values: Object.fromEntries(periodLabels.map((label) => [
         label,
-        formatSignedMoney(investorSummary?.periodSummary?.[label]?.foreign || 0),
+        formatMoneyWithStrength(investorSummary?.periodSummary?.[label]?.foreign || 0, investorSummary?.supplyStrength?.[label]?.foreign || 0),
       ])),
-      tones: Object.fromEntries(periodLabels.map((label) => [
-        label,
-        moneyTone(investorSummary?.periodSummary?.[label]?.foreign || 0),
-      ])),
+      tones: Object.fromEntries(periodLabels.map((label) => [label, moneyTone(investorSummary?.periodSummary?.[label]?.foreign || 0)])),
     },
   ];
 
@@ -1773,50 +1726,60 @@ export default function App() {
     let cancelled = false;
 
     async function loadPeerScores() {
-      if (!stock?.code) {
-        setThemeGroups([]);
+      if (!stock?.code || !dailyData || dailyData.length === 0) {
         setPeerScores([]);
         return;
       }
 
       try {
         setPeerLoading(true);
-
         const themeResponse = await fetch(`https://gae-stock-api.onrender.com/api/theme/${stock.code}`);
-        if (!themeResponse.ok) throw new Error("테마 데이터를 불러오지 못했습니다.");
-
         const themeJson = await themeResponse.json();
         const groups = Array.isArray(themeJson.themeGroups) ? themeJson.themeGroups : [];
         const safeIndex = Math.min(activeThemeIndex, Math.max(0, groups.length - 1));
         const activeGroup = groups[safeIndex] || { theme: themeJson.theme, peers: themeJson.peers || [] };
         const peers = Array.isArray(activeGroup.peers) ? activeGroup.peers.slice(0, 20) : [];
 
-        const rows = peers.map((peer, idx) => {
-          const marketCap = Number(peer.marketCap || peer.marcap || peer.market_cap || peer.Marcap || 0);
-          const relevanceScore = Number(peer.relevanceScore ?? 50);
-          const rankPenalty = Math.min(12, idx * 0.8);
-          const marketCapBonus = marketCap > 0 ? Math.min(10, Math.log10(marketCap) / 2) : 0;
-          const score = clampScore(relevanceScore * 0.82 + marketCapBonus + 6 - rankPenalty);
-
-          return {
-            name: peer.name,
-            code: peer.code,
-            score,
-            change: "-",
-            marketCap,
-          };
-        });
-
         if (!cancelled) {
           setThemeGroups(groups);
           if (safeIndex !== activeThemeIndex) setActiveThemeIndex(safeIndex);
-          setPeerScores(rows);
+        }
+
+        const rows = await Promise.all(
+          peers.map(async (peer) => {
+            try {
+              const dailyResponse = await fetch(`https://gae-stock-api.onrender.com/api/daily/${peer.code}`);
+              const dailyJson = await dailyResponse.json();
+              const peerDaily = Array.isArray(dailyJson.data) ? dailyJson.data : [];
+              if (peerDaily.length < 30) return null;
+
+              const peerLevels = calculateDynamicLevels(peerDaily, chartLookbackDays);
+              const scores = calculateTradingScores(peerDaily, { theme: activeGroup.theme || themeJson.theme, scores: defaultScores }, peerLevels);
+              const score = Math.round(Object.values(scores).reduce((a, b) => a + b, 0) / Object.values(scores).length);
+              const latestPeer = peerDaily[peerDaily.length - 1];
+              const prevPeer = peerDaily[peerDaily.length - 2];
+              const change = latestPeer && prevPeer && prevPeer.close
+                ? ((latestPeer.close - prevPeer.close) / prevPeer.close) * 100
+                : 0;
+
+              return {
+                name: peer.name,
+                code: peer.code,
+                score,
+                change: `${change >= 0 ? "+" : ""}${change.toFixed(1)}%`,
+                marketCap: Number(peer.marketCap || peer.marcap || peer.market_cap || peer.Marcap || 0),
+              };
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        if (!cancelled) {
+          setPeerScores(rows.filter(Boolean));
         }
       } catch {
-        if (!cancelled) {
-          setThemeGroups([]);
-          setPeerScores([]);
-        }
+        if (!cancelled) setPeerScores([]);
       } finally {
         if (!cancelled) setPeerLoading(false);
       }
@@ -1827,7 +1790,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [stock?.code, activeThemeIndex]);
+  }, [stock?.code, dailyData, chartLookbackDays, stock?.theme, activeThemeIndex]);
 
   const marketCap = value ? Math.round((value * 26) / 100000000) : 0;
 
@@ -1889,14 +1852,10 @@ export default function App() {
     const code = String(item?.code || "");
     const themeKey = String(themeName || "미분류");
     if (!code) return;
-
     setThemeDemotions((prev) => {
       const current = Array.isArray(prev[themeKey]) ? prev[themeKey].map(String) : [];
       const nextList = current.includes(code) ? current : [...current, code];
-      const next = {
-        ...prev,
-        [themeKey]: nextList,
-      };
+      const next = { ...prev, [themeKey]: nextList };
       localStorage.setItem("themeDemotions", JSON.stringify(next));
       return next;
     });
@@ -1906,18 +1865,13 @@ export default function App() {
     const stockNameKey = String(stockKey || stock?.name || "");
     const themeKey = String(themeName || "");
     if (!stockNameKey || !themeKey) return;
-
     setThemeHiddenByStock((prev) => {
       const current = Array.isArray(prev[stockNameKey]) ? prev[stockNameKey].map(String) : [];
       const nextList = current.includes(themeKey) ? current : [...current, themeKey];
-      const next = {
-        ...prev,
-        [stockNameKey]: nextList,
-      };
+      const next = { ...prev, [stockNameKey]: nextList };
       localStorage.setItem("themeHiddenByStock", JSON.stringify(next));
       return next;
     });
-
     setActiveThemeIndex(0);
   };
 
@@ -1969,7 +1923,60 @@ export default function App() {
               </div>
               <div className="mt-2">
                 <StarRating score={averageScore} />
-                <p className="mt-1 text-xs font-black text-slate-500">{(averageScore / 20).toFixed(1)} / 5.0</p>
+                <p className="mt-1 text-xs font-black text-slate-500">{enhancedScore.label} · {(averageScore / 20).toFixed(1)} / 5.0</p>
+              </div>
+            </div>
+          </Card>
+        </section>
+
+        <section className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+          <Card>
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-black text-slate-950">오늘의 매매 점수 구성</h2>
+                <p className="text-xs font-bold text-slate-500">추세 25 · 거래량 20 · 수급 20 · 매물대 15 · 변동성 10 · 테마 7 · 다음날 3</p>
+              </div>
+              <span className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-black text-white">{enhancedScore.score}점</span>
+            </div>
+            <div className="grid gap-2 md:grid-cols-4">
+              {[
+                ["추세", enhancedScore.parts.trend],
+                ["거래량", enhancedScore.parts.volume],
+                ["수급", enhancedScore.parts.supply],
+                ["매물대", enhancedScore.parts.volumeProfile],
+                ["변동성", enhancedScore.parts.volatility],
+                ["테마", enhancedScore.parts.theme],
+                ["다음날", enhancedScore.parts.nextDay],
+              ].map(([label, score]) => (
+                <div key={label} className="rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-100">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-black text-slate-500">{label}</span>
+                    <b className="text-sm text-slate-950">{score}점</b>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                    <div className="h-full rounded-full bg-slate-900" style={{ width: `${score}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+          <Card>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <h3 className="mb-2 text-sm font-black text-emerald-700">강점</h3>
+                <div className="space-y-2">
+                  {(enhancedScore.strengths.length ? enhancedScore.strengths : ["뚜렷한 강점 부족"]).map((text) => (
+                    <p key={text} className="rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">{text}</p>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h3 className="mb-2 text-sm font-black text-rose-700">부담</h3>
+                <div className="space-y-2">
+                  {(enhancedScore.weaknesses.length ? enhancedScore.weaknesses : ["뚜렷한 부담 제한적"]).map((text) => (
+                    <p key={text} className="rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800">{text}</p>
+                  ))}
+                </div>
               </div>
             </div>
           </Card>
@@ -2003,41 +2010,11 @@ export default function App() {
             </div>
             <CandleChart data={candleData} months={chartMonths} levels={levels} volumes={volumeData} />
             <section className="mt-4 grid gap-3 md:grid-cols-5">
-              <BottomTile
-                icon={TrendingUp}
-                label="추세"
-                value={averageScore >= 60 ? "상승 전환 시도" : "약세 지속"}
-                sub="차트 구조 기준"
-                tone={averageScore >= 60 ? "green" : "rose"}
-              />
-              <BottomTile
-                icon={Activity}
-                label="변동성"
-                value={volatilityStatus.title}
-                sub={volatilityStatus.sub}
-                tone={volatilityStatus.tone}
-              />
-              <BottomTile
-                icon={Users}
-                label="기관 순매수"
-                value={institutionStatus.title}
-                sub={institutionStatus.sub}
-                tone={institutionStatus.tone === "red" ? "rose" : institutionStatus.tone === "blue" ? "blue" : "blue"}
-              />
-              <BottomTile
-                icon={Globe2}
-                label="외국인 순매수"
-                value={foreignStatus.title}
-                sub={foreignStatusSub}
-                tone={foreignStatus.tone === "red" ? "rose" : foreignStatus.tone === "blue" ? "blue" : "blue"}
-              />
-              <BottomTile
-                icon={BarChart3}
-                label="다음날 통계"
-                value={nextDayStatus.title}
-                sub={nextDayStatus.sub}
-                tone={nextDayStatus.tone === "red" ? "rose" : nextDayStatus.tone === "blue" ? "blue" : "blue"}
-              />
+              <BottomTile icon={TrendingUp} label="추세" value={averageScore >= 60 ? "상승 전환 시도" : "약세 지속"} sub="차트 구조 기준" tone={averageScore >= 60 ? "green" : "rose"} />
+              <BottomTile icon={Activity} label="변동성" value={volatilityStatus.title} sub={volatilityStatus.sub} tone={volatilityStatus.tone} />
+              <BottomTile icon={Users} label="기관 순매수" value={institutionStatus.title} sub={institutionStatusSub} tone={institutionStatus.tone === "red" ? "rose" : institutionStatus.tone === "blue" ? "blue" : "blue"} />
+              <BottomTile icon={Globe2} label="외국인 순매수" value={foreignStatus.title} sub={foreignStatusSub} tone={foreignStatus.tone === "red" ? "rose" : foreignStatus.tone === "blue" ? "blue" : "blue"} />
+              <BottomTile icon={BarChart3} label="다음날 통계" value={nextDayStatus.title} sub={nextDayStatus.sub} tone={nextDayStatus.tone === "red" ? "rose" : nextDayStatus.tone === "blue" ? "blue" : "blue"} />
             </section>
             <PeriodSummaryTable rows={periodSummaryRows} labels={periodLabels} />
             <ThemePeerScores
@@ -2053,16 +2030,17 @@ export default function App() {
               demotedThemesByStock={themeHiddenByStock}
               onDemoteTheme={handleDemoteTheme}
             />
-            <p className="mt-2 text-xs font-semibold text-slate-400">※ 차트는 KRX 일봉 데이터를 기반으로 표시됩니다. 수급 금액은 추정값이며, 테마 유사 종목 점수는 백엔드 테마 API 기반 간이 점수입니다.</p>
+            <p className="mt-2 text-xs font-semibold text-slate-400">※ 차트는 KRX 일봉 데이터를 기반으로 표시됩니다. 수급·테마 점수와 테마 유사 종목 점수는 아직 일부 예시값입니다.</p>
           </Card>
 
           <div className="space-y-5">
             <Card>
               <h2 className="mb-4 text-2xl font-black">내일 대응 구간</h2>
               <div className="space-y-3">
-                <SideRow color="green" title="상승 확인선" value={levels.confirm} desc={`${chartPeriodLabel} 기준 단기 추세 전환 확인 가격대`} />
-                <SideRow color="blue" title="강한 돌파선" value={levels.breakout} desc={`${chartPeriodLabel} 기준 강한 매수세 돌파 필요 가격대`} />
-                <SideRow color="amber" title="눌림 관심구간" value={levels.pullback} desc={`${chartPeriodLabel} 기준 하락 시 관심을 가질 매수 구간`} />
+                <SideRow color="green" title="돌파 확인가" value={levels.confirm} desc={`${chartPeriodLabel} 기준 가장 가까운 확인 가격대`} />
+                <SideRow color="blue" title="1차 저항 / 강한 돌파" value={levels.breakout} desc={`${chartPeriodLabel} 기준 강한 매수세가 필요한 가격대`} />
+                <SideRow color="amber" title="1차 지지 / 눌림" value={levels.pullback} desc={`${chartPeriodLabel} 기준 하락 시 관심을 가질 매수 구간`} />
+                <SideRow color="rose" title="손절 기준가" value={levels.invalid} desc={`${chartPeriodLabel} 기준 지지 이탈 위험 가격대`} />
               </div>
             </Card>
 
@@ -2072,18 +2050,15 @@ export default function App() {
                 <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-black text-slate-600">{chartPeriodLabel} 기준</span>
               </div>
               <div className="space-y-3">
-                <SideRow color="rose" title="위 저항 매물대" value={levels.resistance} desc={`${chartPeriodLabel} 기준 현재가 위쪽의 가까운 저항 구간`} />
-                <SideRow color="green" title="아래 지지 매물대" value={levels.support} desc={`${chartPeriodLabel} 기준 현재가 아래쪽의 가까운 지지 구간`} />
-                <SideRow color="amber" title="최대 매물대" value={levels.maxVolumeZone} desc={`${chartPeriodLabel} 기준 거래량이 가장 많이 쌓인 구간`} />
+                <SideRow color="rose" title="위 저항 매물대" value={levels.resistance} desc={levels.resistanceDesc || `${chartPeriodLabel} 기준 현재가 위쪽의 가까운 저항 구간`} />
+                <SideRow color="green" title="아래 지지 매물대" value={levels.support} desc={levels.supportDesc || `${chartPeriodLabel} 기준 현재가 아래쪽의 가까운 지지 구간`} />
+                <SideRow color="amber" title="최대 매물대" value={levels.maxVolumeZone} desc={levels.maxVolumeZoneDesc || `${chartPeriodLabel} 기준 거래량이 가장 많이 쌓인 구간`} />
               </div>
               <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <p className="font-black text-slate-900">수급 현황</p>
-                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500">
-                    {investorLoading ? "불러오는 중" : investorData?.summary?.date || "API 필요"}
-                  </span>
+                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500">{investorLoading ? "불러오는 중" : investorData?.summary?.date || "API 필요"}</span>
                 </div>
-
                 {investorData?.summary ? (
                   <div className="space-y-3 text-sm">
                     {[
@@ -2092,39 +2067,29 @@ export default function App() {
                       { label: "20일", data: investorData.summary.sum20 },
                     ].map((row) => (
                       <div key={row.label} className="rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-100">
-                        <div className="mb-2 flex items-center justify-between">
-                          <b className="text-slate-900">{row.label} 순매수</b>
-                          <span className="text-[10px] font-bold text-slate-400">거래대금 기준</span>
-                        </div>
+                        <div className="mb-2 flex items-center justify-between"><b className="text-slate-900">{row.label} 순매수</b><span className="text-[10px] font-bold text-slate-400">추정금액</span></div>
                         <div className="grid grid-cols-3 gap-2 text-xs">
-                          <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100">
-                            <p className="font-bold text-slate-500">개인</p>
-                            <b className={Number(row.data?.retail || 0) > 0 ? "text-rose-600" : "text-blue-600"}>{formatSignedMoney(row.data?.retail)}</b>
-                          </div>
-                          <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100">
-                            <p className="font-bold text-slate-500">외국인</p>
-                            <b className={Number(row.data?.foreign || 0) > 0 ? "text-rose-600" : "text-blue-600"}>{formatSignedMoney(row.data?.foreign)}</b>
-                          </div>
-                          <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100">
-                            <p className="font-bold text-slate-500">기관</p>
-                            <b className={Number(row.data?.institution || 0) > 0 ? "text-rose-600" : "text-blue-600"}>{formatSignedMoney(row.data?.institution)}</b>
-                          </div>
+                          <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100"><p className="font-bold text-slate-500">개인</p><b className={Number(row.data?.retail || 0) > 0 ? "text-rose-600" : "text-blue-600"}>{formatSignedMoney(row.data?.retail)}</b></div>
+                          <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100"><p className="font-bold text-slate-500">외국인</p><b className={Number(row.data?.foreign || 0) > 0 ? "text-rose-600" : "text-blue-600"}>{formatSignedMoney(row.data?.foreign)}</b></div>
+                          <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100"><p className="font-bold text-slate-500">기관</p><b className={Number(row.data?.institution || 0) > 0 ? "text-rose-600" : "text-blue-600"}>{formatSignedMoney(row.data?.institution)}</b></div>
                         </div>
                       </div>
                     ))}
-
-                    <div className="rounded-xl bg-slate-900 p-3 text-white">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-300">수급 점수</span>
-                        <b className="text-lg">{investorData.summary.supplyScore ?? "-"}점</b>
-                      </div>
-                      <p className="mt-1 text-xs font-bold text-slate-300">{investorData.summary.signal || "수급 데이터 확인 중"}</p>
+                    <div className="rounded-2xl bg-blue-50 p-3 ring-1 ring-blue-100">
+                      <div className="flex items-center justify-between gap-2"><span className="text-xs font-black text-blue-700">외국인 보유율</span><b className="text-sm text-slate-950">{foreignHoldRate > 0 ? `${foreignHoldRate.toFixed(2)}%` : "-"}</b></div>
+                      <p className="mt-1 text-xs font-bold text-blue-700">5일 {formatSignedPoint(foreignHoldChange5)} · 20일 {formatSignedPoint(foreignHoldChange20)}</p>
                     </div>
+                    <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-100">
+                      <div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-black text-slate-700">1개월 수급강도</span><span className="text-[10px] font-bold text-slate-400">순매수 / 시총</span></div>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100"><p className="font-bold text-slate-500">외국인</p><b className={foreignStrength20 > 0 ? "text-rose-600" : foreignStrength20 < 0 ? "text-blue-600" : "text-slate-500"}>{formatSignedPercent(foreignStrength20, 2)}</b></div>
+                        <div className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100"><p className="font-bold text-slate-500">기관</p><b className={institutionStrength20 > 0 ? "text-rose-600" : institutionStrength20 < 0 ? "text-blue-600" : "text-slate-500"}>{formatSignedPercent(institutionStrength20, 2)}</b></div>
+                      </div>
+                    </div>
+                    <div className="rounded-xl bg-slate-900 p-3 text-white"><div className="flex items-center justify-between"><span className="text-xs font-bold text-slate-300">수급 점수</span><b className="text-lg">{investorData.summary.supplyScore ?? "-"}점</b></div><p className="mt-1 text-xs font-bold text-slate-300">{investorData.summary.signal || "수급 데이터 확인 중"}</p></div>
                   </div>
                 ) : (
-                  <div className="rounded-xl bg-slate-50 p-3 text-xs font-bold text-slate-500">
-                    {investorError || "수급 API 연결 후 1일·5일·20일 개인·외국인·기관 순매수가 표시됩니다."}
-                  </div>
+                  <div className="rounded-xl bg-slate-50 p-3 text-xs font-bold text-slate-500">{investorError || "수급 API 연결 후 표시됩니다."}</div>
                 )}
               </div>
 
@@ -2134,22 +2099,28 @@ export default function App() {
                   <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500">{avgCostPeriod} 기준</span>
                 </div>
                 <div className="space-y-2 text-sm">
-                  <div className="flex justify-between rounded-xl bg-slate-50 p-2">
-                    <span>개인</span>
-                    <b>{formatAvgCostCell(investorData?.summary?.avgCost?.[avgCostPeriod]?.retail, stock.avgCost?.[avgCostPeriod]?.retail)}</b>
-                  </div>
-                  <div className="flex justify-between rounded-xl bg-blue-50 p-2">
-                    <span>외국인</span>
-                    <b>{formatAvgCostCell(investorData?.summary?.avgCost?.[avgCostPeriod]?.foreign, stock.avgCost?.[avgCostPeriod]?.foreign)}</b>
-                  </div>
-                  <div className="flex justify-between rounded-xl bg-violet-50 p-2">
-                    <span>기관</span>
-                    <b>{formatAvgCostCell(investorData?.summary?.avgCost?.[avgCostPeriod]?.institution, stock.avgCost?.[avgCostPeriod]?.institution)}</b>
-                  </div>
+                  <div className="flex justify-between rounded-xl bg-slate-50 p-2"><span>개인</span><b>{formatAvgCostCell(investorData?.summary?.avgCost?.[avgCostPeriod]?.retail, stock.avgCost?.[avgCostPeriod]?.retail)}</b></div>
+                  <div className="flex justify-between rounded-xl bg-blue-50 p-2"><span>외국인</span><b>{formatAvgCostCell(investorData?.summary?.avgCost?.[avgCostPeriod]?.foreign, stock.avgCost?.[avgCostPeriod]?.foreign)}</b></div>
+                  <div className="flex justify-between rounded-xl bg-violet-50 p-2"><span>기관</span><b>{formatAvgCostCell(investorData?.summary?.avgCost?.[avgCostPeriod]?.institution, stock.avgCost?.[avgCostPeriod]?.institution)}</b></div>
                 </div>
-                <p className="mt-2 text-[11px] font-semibold text-slate-400">
-                  차트 기간 버튼과 연동됩니다. 수급 평균단가는 기간 전체 순매수 금액 ÷ 순매수 수량 기준 추정값입니다.
-                </p>
+                <p className="mt-2 text-[11px] font-semibold text-slate-400">차트 기간 버튼과 연동됩니다. 수급 평균단가는 기간 전체 순매수 금액 ÷ 순매수 수량 기준 추정값입니다.</p>
+              </div>
+            </Card>
+
+            <Card>
+              <h2 className="mb-4 text-2xl font-black">오늘의 매매 점수</h2>
+              <MiniScoreStars score={averageScore} />
+              <p className="mt-3 text-sm font-bold text-slate-500">{scoreText(averageScore)} 구간입니다.</p>
+              <div className="mt-4 rounded-2xl bg-slate-50 p-3">
+                <p className="mb-2 text-xs font-black text-slate-500">최근 5일 매매 점수</p>
+                <div className="grid grid-cols-5 gap-1">
+                  {recentFiveScores.map((item) => (
+                    <div key={item.day} className="rounded-xl bg-white p-2 text-center ring-1 ring-slate-100">
+                      <p className="text-[10px] font-bold text-slate-500">{item.day}</p>
+                      <p className="text-sm font-black text-slate-950">{item.score}</p>
+                    </div>
+                  ))}
+                </div>
               </div>
             </Card>
           </div>
@@ -2170,8 +2141,8 @@ export default function App() {
             <div className="flex gap-2 rounded-2xl bg-amber-50 p-4 text-sm leading-7 text-amber-900">
               <AlertTriangle className="mt-1 h-4 w-4 shrink-0" />
               <div className="space-y-2">
-                <p>현재 차트와 가격 데이터는 FastAPI pykrx 서버의 KRX 일봉을 사용합니다. 수급 평균단가, 수급 지표, 테마 유사 종목 점수는 실제 데이터 연결 전까지 일부 예시값입니다.</p>
-                <p className="font-black">오늘의 매매 점수 계산 방식: 실제 일봉 데이터를 기준으로 가격구조, 추세, 거래량, 모멘텀, 변동성, 수급 추정, 테마, 매물대, 캔들 9개 지표군을 각각 100점으로 평가한 뒤 평균값으로 표시합니다. 수급은 아직 외국인·기관 API 연결 전이라 가격과 거래대금 흐름으로 임시 추정합니다. 별점은 20점당 1칸 기준입니다.</p>
+                <p>현재 차트와 가격 데이터는 FastAPI pykrx 서버의 KRX 일봉을 사용합니다. 수급 금액은 네이버 외국인·기관 순매매량 × 종가 기준 추정값이며, 테마 유사 종목 점수는 백엔드 테마 데이터와 일봉 점수를 함께 사용합니다.</p>
+                <p className="font-black">오늘의 매매 점수 계산 방식: 추세 25%, 거래량·거래대금 20%, 수급강도 20%, 매물대 위치 15%, 변동성 10%, 테마 강도 7%, 다음날 유사패턴 통계 3%로 가중 계산합니다. 수급강도는 순매수 추정금액 / 시가총액 기준입니다. 별점은 20점당 1칸 기준입니다.</p>
               </div>
             </div>
           </Card>
