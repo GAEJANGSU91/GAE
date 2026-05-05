@@ -1770,64 +1770,97 @@ export default function App() {
   ];
 
   useEffect(() => {
-    let cancelled = false;
+  let cancelled = false;
 
-    async function loadPeerScores() {
-      if (!stock?.code) {
-        setThemeGroups([]);
-        setPeerScores([]);
-        return;
-      }
-
-      try {
-        setPeerLoading(true);
-
-        const themeResponse = await fetch(`https://gae-stock-api.onrender.com/api/theme/${stock.code}`);
-        if (!themeResponse.ok) throw new Error("테마 데이터를 불러오지 못했습니다.");
-
-        const themeJson = await themeResponse.json();
-        const groups = Array.isArray(themeJson.themeGroups) ? themeJson.themeGroups : [];
-        const safeIndex = Math.min(activeThemeIndex, Math.max(0, groups.length - 1));
-        const activeGroup = groups[safeIndex] || { theme: themeJson.theme, peers: themeJson.peers || [] };
-        const peers = Array.isArray(activeGroup.peers) ? activeGroup.peers.slice(0, 20) : [];
-
-        const rows = peers.map((peer, idx) => {
-          const marketCap = Number(peer.marketCap || peer.marcap || peer.market_cap || peer.Marcap || 0);
-          const relevanceScore = Number(peer.relevanceScore ?? 50);
-          const rankPenalty = Math.min(12, idx * 0.8);
-          const marketCapBonus = marketCap > 0 ? Math.min(10, Math.log10(marketCap) / 2) : 0;
-          const score = clampScore(relevanceScore * 0.82 + marketCapBonus + 6 - rankPenalty);
-
-          return {
-            name: peer.name,
-            code: peer.code,
-            score,
-            change: "-",
-            marketCap,
-          };
-        });
-
-        if (!cancelled) {
-          setThemeGroups(groups);
-          if (safeIndex !== activeThemeIndex) setActiveThemeIndex(safeIndex);
-          setPeerScores(rows);
-        }
-      } catch {
-        if (!cancelled) {
-          setThemeGroups([]);
-          setPeerScores([]);
-        }
-      } finally {
-        if (!cancelled) setPeerLoading(false);
-      }
+  async function loadThemeData() {
+    if (!stock?.code) {
+      setThemeGroups([]);
+      setPeerScores([]);
+      return;
     }
 
-    loadPeerScores();
+    try {
+      setPeerLoading(true);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [stock?.code, activeThemeIndex]);
+      const themeResponse = await fetch(
+        `https://gae-stock-api.onrender.com/api/theme/${stock.code}`
+      );
+
+      if (!themeResponse.ok) {
+        throw new Error("테마 데이터를 불러오지 못했습니다.");
+      }
+
+      const themeJson = await themeResponse.json();
+      const groups = Array.isArray(themeJson.themeGroups) ? themeJson.themeGroups : [];
+
+      const safeIndex = Math.min(
+        activeThemeIndex,
+        Math.max(0, groups.length - 1)
+      );
+
+      const activeGroup =
+        groups[safeIndex] || {
+          theme: themeJson.theme,
+          peers: themeJson.peers || [],
+          coreMarketCapTop: themeJson.coreMarketCapTop || [],
+        };
+
+      const peers = Array.isArray(activeGroup.peers)
+        ? activeGroup.peers.slice(0, 20)
+        : [];
+
+      const rows = peers.map((peer) => {
+        const marketCap = Number(
+          peer.marketCap ||
+          peer.marcap ||
+          peer.market_cap ||
+          peer.Marcap ||
+          0
+        );
+
+        const relevanceScore = Number(peer.relevanceScore || 50);
+
+        const marketCapScore = marketCap > 0
+          ? Math.min(25, Math.log10(marketCap) * 2.2)
+          : 0;
+
+        const score = clampScore(relevanceScore * 0.75 + marketCapScore);
+
+        return {
+          name: peer.name,
+          code: peer.code,
+          score,
+          change: "-",
+          marketCap,
+        };
+      });
+
+      if (!cancelled) {
+        setThemeGroups(groups);
+        setPeerScores(rows);
+
+        if (safeIndex !== activeThemeIndex) {
+          setActiveThemeIndex(safeIndex);
+        }
+      }
+    } catch {
+      if (!cancelled) {
+        setThemeGroups([]);
+        setPeerScores([]);
+      }
+    } finally {
+      if (!cancelled) {
+        setPeerLoading(false);
+      }
+    }
+  }
+
+  loadThemeData();
+
+  return () => {
+    cancelled = true;
+  };
+}, [stock?.code, activeThemeIndex]);
 
   const marketCap = value ? Math.round((value * 26) / 100000000) : 0;
 
